@@ -76,7 +76,10 @@ GenomIO/
 │   │   ├── planner.py           # Planning agent
 │   │   └── tools/               # Agent tools
 │   ├── rag/                      # RAG implementation
-│   │   ├── retriever.py         # Document retrieval
+│   │   ├── dnabert_s.py         # DNABERT-S sequence embedder
+│   │   ├── corpus.py            # Reads rag_corpus_uniform into records
+│   │   ├── index.py             # FAISS index, built once and cached
+│   │   ├── retriever.py         # Similarity search used by the agent
 │   │   └── gap_filler.py        # RAG-enhanced gap filling
 │   ├── core/                     # Core functionality
 │   │   ├── gap_filler.py        # Main gap filling logic
@@ -87,8 +90,10 @@ GenomIO/
 │       └── species_analysis.py  # Species analysis tools
 ├── data/                         # Data directory
 │   ├── simulated_draft_genomes/ # Training/test data
-│   ├── test_sequences/          # Test sequences
-│   └── rag_corpus/              # RAG corpus
+│   └── test_sequences/          # Test sequences
+├── rag_corpus_uniform/           # RAG corpus, one NCBI gene per record
+├── rag_corpus/                   # Superseded corpus, kept for reference
+├── embedder_benchmark/           # Why DNABERT-S: 12 experiments, 16 models
 ├── notebooks/                    # Jupyter notebooks
 ├── tests/                        # Test suite
 ├── config/                       # Configuration files
@@ -121,10 +126,22 @@ GenomIO/
 
 GenomIO includes a Retrieval-Augmented Generation system that:
 
-- Builds vector databases from genomic corpora
+- Embeds genomic sequences with **DNABERT-S** (`zhihan1996/DNABERT-S`), selected over 15
+  other DNA models by the benchmark in `embedder_benchmark/`
+- Searches them with a FAISS index over `rag_corpus_uniform/`, a corpus in which every
+  record is one NCBI annotated gene, so no chunking is applied anywhere
 - Retrieves relevant genomic context for gap filling
-- Enhanced prediction accuracy through contextual information
 - Supports custom genomic databases
+
+The index is built once and cached, since it is too large to commit:
+
+```bash
+python3 scripts/build_rag_index.py
+```
+
+**See [`docs/dnabert_s_retrieval.md`](docs/dnabert_s_retrieval.md)** for what this replaced
+and why, written for readers new to the project. It is worth reading before touching the
+agent pipeline, where the change is less obvious than the diff suggests.
 
 ## 🧪 Evaluation
 
@@ -151,13 +168,13 @@ python gap_filler.py
 - Saves results to results_[accession-number].csv
 ### 2. RAG-Enhanced Gap Filling
 
-Run the RAG pipeline (retrieves context from .fna files in rag_corpus/):
+Run the RAG pipeline (retrieves context from the .fna files in rag_corpus_uniform/):
 
-```python  
-cd src/core
-python gap_filler_rag.py
+```python
+python src/core/gap_filler_rag.py
 ```
-- Build a FAISS index from .fna files in rag_corpus/
+- Load the cached DNABERT-S FAISS index, building it first if it is missing
+- Run without RAG → saves results_[accession-number]_no_rag.csv
 - Run with RAG → saves results_[accession-number]_rag.csv
 
 ### 3. Batch Processing
@@ -243,8 +260,9 @@ It uses your `test.py`, `rag/gap_filler.py`, `rag/retriever.py`, and `agents/pla
 
 3. **Context retrieval (rag/retriever.py)**  
    - Extracts DNA-like text from the `sequence` (ACGTN and dashes).  
-   - Splits by `---` and searches `.fna`/`.fasta` files in `rag_corpus` for **exact** or **partial** matches.  
-   - Returns up to **3** best matches (metadata + sequence) as plain text for the gap filler.
+   - Splits by `---`, embeds the flanks either side of each gap with **DNABERT-S**, and searches the FAISS index over `rag_corpus_uniform` by **cosine similarity**.  
+   - Returns up to **3** best matches (metadata + sequence) as plain text for the gap filler.  
+   - A record is returned because it *resembles* the query, not because it contains it letter for letter. That is the difference from the earlier substring search; see [`docs/dnabert_s_retrieval.md`](docs/dnabert_s_retrieval.md).
 
 4. **Gap filling (rag/gap_filler.py)**  
    - Loads `AIRI-Institute/gena-lm-bigbird-base-t2t`.  
