@@ -145,7 +145,7 @@ biologically like** the query.
 
 | | before | after |
 |---|---|---|
-| How a match is found | Python `in`, the flank must appear letter for letter | cosine distance between DNABERT-S embeddings |
+| How a match is found | Python `in`, the flank must appear letter for letter | cosine similarity between DNABERT-S embeddings |
 | What it reads | all of `rag_corpus/`, re-read from disk every call | a FAISS index built once and cached |
 | What "similar" means | identical substring, or nothing | biologically related, usually same species |
 | Speed per call | seconds of file parsing | microseconds of index lookup |

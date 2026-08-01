@@ -3,10 +3,14 @@
 The DNA retrieval index (Index A): DNABERT-S vectors of every CDS record in
 rag_corpus_uniform/, stored in FAISS and searched by cosine similarity.
 
-Vectors are L2 normalised and the index uses inner product, which makes inner product
-equal to cosine. IndexHNSWFlat is used rather than exact IndexFlatIP because the corpus
-has about 43,500 records and the benchmark measured HNSW overtaking exact search at
-around 1,000, at 100% top-1 agreement with brute force at that scale
+Vectors are L2 normalised before they go in, so ordering by Euclidean distance and
+ordering by cosine similarity are the same ordering. IndexHNSWFlat searches with squared
+L2 and that is what FAISS hands back, so search_many converts it to a cosine before
+returning, since distances are better when smaller and cosines when larger.
+
+HNSW is used rather than exact IndexFlatIP because the corpus has about 43,500 records
+and the benchmark measured HNSW overtaking exact search at around 1,000, while still
+agreeing with brute force on 100% of top-1 hits at that scale
 (embedder_benchmark/experiment_8_results.md and experiment_10_results.md).
 
 Building the index means embedding the whole corpus, which takes tens of minutes on CPU.
@@ -72,6 +76,8 @@ def build_index(corpus_dir=None, batch_size=16):
         progress_every=1000,
     )
 
+    # Default metric is squared L2. On unit vectors that ranks identically to cosine,
+    # and it is what the retrieval benchmark measured, so it is kept.
     index = faiss.IndexHNSWFlat(vectors.shape[1], HNSW_M)
     index.hnsw.efConstruction = EF_CONSTRUCTION
     index.hnsw.efSearch = EF_SEARCH
@@ -154,6 +160,18 @@ def search(query_sequence, k=3, corpus_dir=None):
     return results[0] if results else []
 
 
+def _cosine_from_l2(squared_distance):
+    """
+    IndexHNSWFlat searches with squared L2, which is what FAISS returns.
+
+    For unit vectors ||a - b||^2 = 2 - 2*cos, so the cosine is 1 - d/2. Converting here
+    rather than leaving raw distances in the API matters: distances are better when
+    smaller and cosines when larger, and anything merging results from several queries
+    has to know which way round it is.
+    """
+    return 1.0 - float(squared_distance) / 2.0
+
+
 def search_many(query_sequences, k=3, corpus_dir=None):
     """Search several sequences at once. Returns one result list per query."""
     queries = [q for q in query_sequences if q]
@@ -162,10 +180,11 @@ def search_many(query_sequences, k=3, corpus_dir=None):
 
     index, records = load_or_build_index(corpus_dir)
     vectors = _normalise(dnabert_s.embed(queries))
-    scores, ids = index.search(vectors, min(k, index.ntotal))
+    distances, ids = index.search(vectors, min(k, index.ntotal))
 
     out = []
-    for row_scores, row_ids in zip(scores, ids):
-        hits = [(float(s), records[int(i)]) for s, i in zip(row_scores, row_ids) if i >= 0]
+    for row_distances, row_ids in zip(distances, ids):
+        hits = [(_cosine_from_l2(d), records[int(i)])
+                for d, i in zip(row_distances, row_ids) if i >= 0]
         out.append(hits)
     return out

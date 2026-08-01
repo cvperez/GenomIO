@@ -57,7 +57,7 @@ def retrieve_context(user_input: str, k: int = 3) -> str:
     """
     Find the corpus records most similar to the flanks of a gapped sequence.
 
-    Similarity is cosine distance between DNABERT-S embeddings, not substring matching:
+    Similarity is cosine between DNABERT-S embeddings, not substring matching:
     a record comes back because it looks biologically like the query, not because it
     contains it character for character. The return format is unchanged from the
     substring version, so the agent tools that call this need no changes.
