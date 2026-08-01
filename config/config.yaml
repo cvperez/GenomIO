@@ -22,13 +22,17 @@ models:
     max_length: 1000
 
 # RAG Configuration
+# Note: nothing reads this file yet, the values below are the ones hardcoded in
+# src/rag/. It is kept in step so it stops describing a system that no longer exists.
 rag:
-  corpus_directory: "data/rag_corpus"
-  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  corpus_directory: "rag_corpus_uniform"
+  embedding_model: "zhihan1996/DNABERT-S"
   vector_store: "faiss"
-  top_k_results: 5
-  chunk_size: 1000
-  chunk_overlap: 200
+  index_type: "IndexHNSWFlat"   # M=32, efConstruction=200, efSearch=64
+  index_cache: ".cache/rag_index"
+  top_k_results: 3
+  # No chunking. Every corpus record is already one CDS as annotated by NCBI, so a
+  # record boundary is a biological boundary.
 
 # Gap Filling Configuration
 gap_filling:

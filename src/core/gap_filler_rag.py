@@ -1,21 +1,27 @@
 import os
+import sys
 os.environ["TRANSFORMERS_NO_TF"] = "1"
 import pandas as pd
 from Bio import SeqIO, pairwise2
 from transformers import AutoTokenizer, BigBirdForMaskedLM
 import torch
-from sentence_transformers import SentenceTransformer
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import TextLoader
-from pathlib import Path
-from langchain_core.documents import Document
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+# Allow this file to be run directly (python src/core/gap_filler_rag.py) as well as
+# imported as part of the installed package.
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+
+from rag.index import load_or_build_index, search  # noqa: E402
 
 # ----------------------------
 MODEL_NAME = "AIRI-Institute/gena-lm-bigbird-base-t2t"
 MAX_LENGTH = 4096
 NUM_SAMPLES = 10
+
+# The retrieval query is cut down to this many bases either side of the gap. DNABERT-S
+# truncates its input, so passing whole contigs would quietly reduce the query to the
+# first slice of the left contig; these are the bases that actually border the gap.
+QUERY_FLANK = 900
 
 CONTIGS_FILE = "data/simulated_draft_genomes/contigs/AP012051.1_contigs.fasta"
 GAPS_FILE = "data/simulated_draft_genomes/gaps/AP012051.1_gaps.tsv"
@@ -31,12 +37,6 @@ def load_contigs(filepath):
 
 def load_gaps(filepath):
     return pd.read_csv(filepath, sep="\t")
-
-def load_sequences_from_fna(fna_path):
-    sequences = []
-    for record in SeqIO.parse(fna_path, "fasta"):
-        sequences.append(record.seq.upper())  # Or str(record.seq)
-    return sequences
 
 def build_masked_input(left_seq, right_seq):
     return f"{left_seq} [MASKS] {right_seq}"
@@ -133,46 +133,34 @@ def predict_until_length(masked_input_base, tokenizer, model, gap_length, max_at
     print(f"Max attempts reached. Returning best prediction (length = {len(best_seq)})")
     return best_seq
 
-def build_faiss_index(fna_dir="rag_corpus"):
-    print("[INFO] Building FAISS index from .fna files (safe HuggingFaceEmbeddings)...")
-    
-    documents = []
-    fna_files = list(Path(fna_dir).glob("*.fna"))
-    print(f"[INFO] Found {len(fna_files)} .fna files.")
+def build_faiss_index(fna_dir=None):
+    """
+    Return the DNABERT-S index over rag_corpus_uniform/.
 
-    for i, fna_path in enumerate(fna_files, 1):
-        print(f"[INFO] Loading file {i}/{len(fna_files)}: {fna_path.name}")
-        seqs = load_sequences_from_fna(fna_path)
-        for seq in seqs:
-            documents.append(Document(page_content=str(seq)))   
+    This used to chunk every record into 1000 character pieces, embed them with
+    all-MiniLM-L6-v2 and build a fresh FAISS index on every run. Both of those are gone.
+    The chunking is unnecessary because rag_corpus_uniform/ is already one gene per
+    record, and MiniLM is an English sentence encoder that produces no biological
+    structure on nucleotides; embedder_benchmark/ measures the difference.
 
-    print(f"[INFO] Total documents loaded: {len(documents)}")
-    # Paso extra: explora el contenido de los .fna cargados
-    print("\n[INFO] Mostrando primeros documentos del corpus:")
-    for doc in documents[:3]:
-        print(doc.page_content[:200], "\n---")
-
-    print("[INFO] Splitting documents into chunks...")
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_documents(documents)
-    print(f"[INFO] Total chunks created: {len(chunks)}")
-    print("[DEBUG] First 3 chunks:")
-    for i, c in enumerate(chunks[:3]):
-        print(f"  Chunk {i+1}: {c.page_content[:50]}...")
-
-
-    print("[INFO] Initializing HuggingFace embeddings...")
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-    print("[INFO] Building FAISS index from embeddings...")
-    index = FAISS.from_documents(chunks, embeddings)
-    
-    print("[INFO] FAISS index built successfully.")
+    The index is built once and cached under .cache/rag_index/, so this is fast after the
+    first run. Build it up front with scripts/build_rag_index.py.
+    """
+    print("[INFO] Loading DNABERT-S FAISS index over the uniform CDS corpus...")
+    index, records = load_or_build_index(fna_dir)
+    print(f"[INFO] Index ready: {index.ntotal} records.")
     return index
 
 def retrieve_context(index, query_text, k=2):
-    docs = index.similarity_search(query_text, k=k)
-    return "\n".join(doc.page_content for doc in docs)
+    """
+    Nearest CDS records to a DNA query, joined by newlines.
+
+    Returns nucleotides only, exactly as before. The records carry organism and protein
+    metadata, but none of it is returned here, because none of it was in the string the
+    masked language model saw before this change.
+    """
+    hits = search(query_text, k=k)
+    return "\n".join(record["sequence"] for _, record in hits)
 
 def run_pipeline(use_rag=False, faiss_index=None):
     # Load tokenizer and model
@@ -206,7 +194,7 @@ def run_pipeline(use_rag=False, faiss_index=None):
 
         for n in range(NUM_SAMPLES):
             if use_rag and faiss_index:
-                query = left_seq + right_seq
+                query = left_seq[-QUERY_FLANK:] + right_seq[:QUERY_FLANK]
                 external_context = retrieve_context(faiss_index, query)
                 print(f"[DEBUG] Context retrieved for {gap_id}:\n{external_context[:300]}...\n")
                 masked_input_base = build_masked_input_rag(left_seq, right_seq, external_context)
