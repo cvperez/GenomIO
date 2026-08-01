@@ -1,0 +1,25 @@
+# Assembly accession to source organism, as resolved by scripts/download_genomes_uniform.sh.
+# Written by the download script at the moment it resolves each species, so the name here is
+# the one NCBI answered with. Do not edit by hand; rerun the script instead.
+#
+# accession	organism
+GCA_001819145	Candidatus Nealsonbacteria bacterium
+GCA_013426185	Candidatus Woesebacteria bacterium
+GCA_015709715	Nitrospira sp.
+GCA_016699085	Candidatus Nomurabacteria bacterium
+GCA_016699145	Candidatus Peregrinibacteria bacterium
+GCA_016699385	Candidatus Moraniibacteriota bacterium
+GCA_025999335	Candidatus Parcubacteria bacterium
+GCF_000008125	Thermus thermophilus
+GCF_000008725	Chlamydia trachomatis
+GCF_000009005	Staphylococcus aureus
+GCF_000009025	Dehalococcoides mccartyi
+GCF_000013045	Salinibacter ruber
+GCF_000019205	Campylobacter lari
+GCF_000020225	Akkermansia muciniphila
+GCF_000158275	Fusobacterium animalis
+GCF_000204255	Chlamydia psittaci
+GCF_001433955	Fusobacterium polymorphum
+GCF_005697215	Candidatus Saccharibacteria bacterium oral taxon 488
+GCF_016859125	Archangium violaceum
+GCF_030623315	Pseudogemmatithrix spongiicola

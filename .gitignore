@@ -78,13 +78,20 @@ Thumbs.db
 
 # Project specific
 genomes_downloaded/
+genomes_downloaded_uniform/
 *.fna
+!rag_corpus/*.fna
+!rag_corpus_uniform/*.fna
 *.fasta
 *.fa
 *.gz
 results/*.csv
 results/*.json
 !results/.gitkeep
+
+# Built FAISS indices and embeddings. Rebuilt from rag_corpus_uniform/ on demand,
+# too large to commit (~130 MB for the full corpus).
+.cache/
 
 # Model files and checkpoints
 *.pt
