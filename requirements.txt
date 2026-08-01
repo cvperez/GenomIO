@@ -8,11 +8,14 @@ numpy>=1.21.0
 # LangChain for agents
 langchain>=0.1.0
 langchain-core>=0.1.0
+langchain-community>=0.0.20
+langchain-google-genai>=1.0.0   # planner.py runs on gemini-2.5-flash
 python-dotenv>=0.19.0
 
 # RAG and retrieval
 faiss-cpu>=1.7.0
-sentence-transformers>=2.2.0
+einops>=0.6.0                   # imported by the DNABERT-S remote code
+sentence-transformers>=2.2.0    # only used by the text encoders in embedder_benchmark/
 
 # Data processing
 scipy>=1.7.0
