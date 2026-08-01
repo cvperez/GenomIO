@@ -161,6 +161,32 @@ answer is found is different.
 "We replaced retrieval and touched no agent code" is the least obvious thing about this
 change, which is why it gets a heading.
 
+### Flanks have to be long enough
+
+Substring search and similarity search want opposite things from the query. A short flank
+is *easier* to find verbatim, so 50 bases was a reasonable default before. An embedding has
+to characterise a sequence rather than locate it, and 50 bases is not enough to characterise
+anything.
+
+Measured over 100 balanced queries against the full corpus, where 0.05 is chance across the
+20 species:
+
+| Query flank | Precision at rank 1 |
+|---|---|
+| 50 bp | 0.170 |
+| 120 bp | 0.290 |
+| 300 bp | 0.520 |
+| **600 bp** | **0.780** |
+
+`gap-filler-agents/test.py` was building its query with 50 base flanks, which would have
+left the agent retrieving near noise. Its default is now 600, which also sits inside the
+300 to 900 bp band the benchmark was run on, and gives the gap filling model more flanking
+context. `MAX_FLANK` in `retriever.py` caps queries at 900, because DNABERT-S truncates
+beyond roughly 2,000 bases and the part nearest the gap is the part that matters.
+
+The effect measured here is on retrieval. Whether a longer flank also improves the filled
+sequence has not been measured.
+
 ### One knock on effect to know about
 
 `build_masked_input_with_context()` in `src/rag/gap_filler.py` takes the retrieved records
