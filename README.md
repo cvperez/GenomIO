@@ -145,6 +145,13 @@ agent pipeline, where the change is less obvious than the diff suggests.
 
 ## 🧪 Evaluation
 
+> **Known bugs, not yet fixed.** Three problems in the gap filling and scoring code are
+> documented in [`docs/gap_filling_known_bugs.md`](docs/gap_filling_known_bugs.md), with the
+> evidence for each and the change that would fix it. The most important one is that the
+> identity score currently rates random DNA at 64%, higher than any result the pipeline has
+> produced, so **the numbers in `results_AP012051.1_*.csv` should not be used**. Read that
+> document before drawing conclusions from any gap filling output.
+
 The framework includes comprehensive evaluation tools:
 
 - **Accuracy Metrics**: Per-nucleotide and sequence-level accuracy
