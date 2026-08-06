@@ -3,9 +3,13 @@
 This document explains a change to how GenomIO finds reference sequences before it fills a
 gap. It assumes you know what a DNA sequence is and nothing else.
 
-There are two parts. One is a straightforward swap of one model for another. The other
-looks small in the diff but changes how the agent finds anything at all, and that is the
-part worth reading carefully.
+The change is a straightforward swap of one model for another, in one place:
+`src/core/gap_filler_rag.py`, the standalone script that compares gap filling with and
+without retrieval.
+
+**The LangChain agent is not affected.** Every file on the agent path is still exactly as it
+is on `main`, and it still finds context by substring search. Section 3 explains what the
+agent does and why switching it over is a larger decision than it looks.
 
 ---
 
@@ -106,10 +110,11 @@ meaningless without fixing it.
 
 ---
 
-## 3. The hard half: the agent pipeline
+## 3. The agent pipeline is deliberately left alone
 
-This is the part that needs explaining, because **the old agent code contained no embedder
-at all**. "Swap the embedder" does not describe what happened here.
+**The LangChain agent still works exactly as it does on `main`.** DNABERT-S retrieval is
+used by the standalone script only. This section explains what the agent does, why it was
+left as it was, and what it would take to move it over later.
 
 ### The call chain
 
@@ -121,86 +126,63 @@ gap-filler-agents/test.py
   src/agents/planner.py
     a LangChain agent on Gemini 2.5 Flash, forced to call two tools in order
       |
-      +-- 1. context_tool ---> src/rag/retriever.py      <-- THIS is what changed
+      +-- 1. context_tool ---> src/rag/retriever.py      substring search, unchanged
       |
-      +-- 2. gap_filler_tool -> src/rag/gap_filler.py    (GENA-LM, untouched)
+      +-- 2. gap_filler_tool -> src/rag/gap_filler.py    GENA-LM, unchanged
 ```
 
-### What `retriever.py` used to do
+Every file on that path is byte for byte identical to `main`.
 
-It read every file in `rag_corpus/`, all 52 MB of it, from disk. On every single call. Then
-it used Python's `in` operator: a record was a match only if the query flank appeared inside
-it **character for character**.
+### What `retriever.py` does
+
+It reads every file in `rag_corpus/`, all 52 MB of it, from disk. On every single call. Then
+it uses Python's `in` operator: a record is a match only if the query flank appears inside it
+**character for character**.
 
 That is not a similarity search, it is a substring search. A reference gene 98% identical to
-the query scored exactly the same as one sharing nothing: no match. In practice the tool
-mostly returned "no matching sequence found", and when it did return something, it was
-because of an exact repeat.
+the query scores exactly the same as one sharing nothing: no match. In practice the tool
+mostly returns "no matching sequence found", and when it does return something, it is because
+of an exact repeat.
 
-### What it does now
+Note that the corpus it reads is `rag_corpus/`, the older mixed granularity one, not
+`rag_corpus_uniform/`. The two corpora coexist in the repository for exactly this reason.
 
-It embeds the flanks either side of each gap with DNABERT-S, searches the FAISS index by
-cosine similarity, and returns the closest records. A record comes back because it **looks
-biologically like** the query.
+### Why the agent was not switched over
 
-| | before | after |
-|---|---|---|
-| How a match is found | Python `in`, the flank must appear letter for letter | cosine similarity between DNABERT-S embeddings |
-| What it reads | all of `rag_corpus/`, re-read from disk every call | a FAISS index built once and cached |
-| What "similar" means | identical substring, or nothing | biologically related, usually same species |
-| Speed per call | seconds of file parsing | microseconds of index lookup |
-| Return value | `"Match 1:\n{header}\n{sequence}"` | **unchanged, deliberately** |
+Swapping it is not hard. `retrieve_context()` would keep its signature and its
+`"Match 1:\n{header}\n{sequence}"` output format, so `planner.py` and `planner_tools.py`
+would not need a single line changed. But it has consequences that reach past retrieval, and
+they should be decided rather than inherited:
 
-### Why no agent code changed
-
-That last row is the point. `retrieve_context()` kept its exact signature and its exact
-output format, so `planner.py` and `planner_tools.py` did not need a single line changed.
-The agent asks the same question and gets an answer in the same shape; only the way the
-answer is found is different.
-
-"We replaced retrieval and touched no agent code" is the least obvious thing about this
-change, which is why it gets a heading.
-
-### Flanks have to be long enough
-
-Substring search and similarity search want opposite things from the query. A short flank
-is *easier* to find verbatim, so 50 bases was a reasonable default before. An embedding has
-to characterise a sequence rather than locate it, and 50 bases is not enough to characterise
-anything.
-
-Measured over 100 balanced queries against the full corpus, where 0.05 is chance across the
-20 species:
+**The flank would have to get much longer.** Substring search and similarity search want
+opposite things from a query. A short flank is *easier* to find verbatim, so the 50 bases
+that `test.py` uses is a sensible default for the current design. An embedding has to
+characterise a sequence rather than locate it, and 50 bases characterises nothing. Measured
+over 100 balanced queries against the full corpus, where 0.05 is chance across the 20
+species:
 
 | Query flank | Precision at rank 1 |
 |---|---|
 | 50 bp | 0.170 |
 | 120 bp | 0.290 |
 | 300 bp | 0.520 |
-| **600 bp** | **0.780** |
+| 600 bp | 0.780 |
 
-`gap-filler-agents/test.py` was building its query with 50 base flanks, which would have
-left the agent retrieving near noise. Its default is now 600, which also sits inside the
-300 to 900 bp band the benchmark was run on, and gives the gap filling model more flanking
-context. `MAX_FLANK` in `retriever.py` caps queries at 900, because DNABERT-S truncates
-beyond roughly 2,000 bases and the part nearest the gap is the part that matters.
+At 50 bases an embedding based agent would be retrieving close to noise, so switching the
+retriever without also raising the flank would make the agent worse, not better. Raising the
+flank in turn changes what the gap filling model sees, which is a behaviour change of its own.
 
-The effect measured here is on retrieval. Whether a longer flank also improves the filled
-sequence has not been measured.
+**`build_masked_input_with_context()` would stop finding anything.** That function, in
+`src/rag/gap_filler.py`, takes the retrieved records and looks for the query flank **inside**
+them with `match.index(start)`, so it can trim the surrounding context and shrink the gap
+accordingly. Under substring retrieval that always works, because retrieval has already
+guaranteed the flank is in there. Under similarity retrieval a record comes back for being
+alike rather than for containing the query, so the lookup raises `ValueError`, the existing
+handler swallows it, and the gap length silently stays at its full value. The agent would
+still run and would simply stop getting any benefit from the context trimming it does today.
 
-### One knock on effect to know about
-
-`build_masked_input_with_context()` in `src/rag/gap_filler.py` takes the retrieved records
-and looks for the query flank **inside** them, using `match.index(start)`, so it can trim
-the surrounding context and shrink the gap accordingly.
-
-Under substring retrieval that always worked, because retrieval had already guaranteed the
-flank was in there. Under similarity retrieval it usually will not be found: a record is
-returned for being alike, not for containing the query. The existing error handler catches
-that and the gap length stays at its full value.
-
-Nothing needs fixing. That is correct behaviour for a similarity search, and the code
-already handles it. But the gap filling model does see something different now, so it is
-worth knowing before someone reads it as a regression.
+Both of those are solvable. Neither is a one line change, which is why the agent stays on
+`main`'s behaviour for now.
 
 ---
 
@@ -228,12 +210,15 @@ result is confidently wrong rather than obviously broken.
 The corpus itself is committed, so `scripts/download_genomes_uniform.sh` never has to be
 re-run. Run it only to refresh the corpus from current NCBI assemblies.
 
-Then, as before:
+Then:
 
 ```bash
-python -m gap-filler-agents.test     # the agent pipeline, needs GOOGLE_API_KEY in .env
-python src/core/gap_filler_rag.py    # the with and without retrieval comparison
+python src/core/gap_filler_rag.py    # the with and without retrieval comparison, uses the index
+python -m gap-filler-agents.test     # the agent, unchanged, does not use the index at all
 ```
+
+The agent needs `GOOGLE_API_KEY` in `.env` and reads `rag_corpus/` directly, so it does not
+need the index built.
 
 ---
 

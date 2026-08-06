@@ -50,22 +50,7 @@ def read_fasta_contigs(fasta_path: Path) -> list[dict]:
         raise RuntimeError(f"No contigs found in {fasta_path}")
     return contigs
 
-# How much of each contig to keep either side of the gap. 50 was enough when retrieval
-# was a substring search, where a short flank is easier to find verbatim. It is far too
-# short for embedding based retrieval, which has to characterise a sequence rather than
-# locate it. Measured over 100 balanced queries against the full corpus, where 0.05 is
-# chance across the 20 species:
-#
-#     50 bp -> P@1 0.170     300 bp -> P@1 0.520
-#    120 bp -> P@1 0.290     600 bp -> P@1 0.780
-#
-# 600 also sits inside the 300 to 900 bp band the retrieval benchmark was run on, and
-# gives the masked language model more flanking context to condition on.
-DEFAULT_FLANK = 600
-
-
-def build_gapped_sequence_full(contig1_seq: str, contig2_seq: str,
-                               flank: int = DEFAULT_FLANK) -> str:
+def build_gapped_sequence_full(contig1_seq: str, contig2_seq: str, flank: int = 50) -> str:
     left = contig1_seq[-flank:] if len(contig1_seq) >= flank else contig1_seq
     right = contig2_seq[:flank] if len(contig2_seq) >= flank else contig2_seq
     return f"{left}---{right}"

@@ -139,9 +139,13 @@ The index is built once and cached, since it is too large to commit:
 python3 scripts/build_rag_index.py
 ```
 
+This applies to `src/core/gap_filler_rag.py`, the standalone comparison script. **The
+LangChain agent is unchanged**: it still finds context by substring search over
+`rag_corpus/` and does not use the index.
+
 **See [`docs/dnabert_s_retrieval.md`](docs/dnabert_s_retrieval.md)** for what this replaced
-and why, written for readers new to the project. It is worth reading before touching the
-agent pipeline, where the change is less obvious than the diff suggests.
+and why, written for readers new to the project, including what switching the agent over
+would involve.
 
 ## 🧪 Evaluation
 
@@ -267,9 +271,9 @@ It uses your `test.py`, `rag/gap_filler.py`, `rag/retriever.py`, and `agents/pla
 
 3. **Context retrieval (rag/retriever.py)**  
    - Extracts DNA-like text from the `sequence` (ACGTN and dashes).  
-   - Splits by `---`, embeds the flanks either side of each gap with **DNABERT-S**, and searches the FAISS index over `rag_corpus_uniform` by **cosine similarity**.  
+   - Splits by `---` and searches `.fna`/`.fasta` files in `rag_corpus` for **exact** or **partial** substring matches.  
    - Returns up to **3** best matches (metadata + sequence) as plain text for the gap filler.  
-   - A record is returned because it *resembles* the query, not because it contains it letter for letter. That is the difference from the earlier substring search; see [`docs/dnabert_s_retrieval.md`](docs/dnabert_s_retrieval.md).
+   - This path is unchanged. The DNABERT-S index is used by `src/core/gap_filler_rag.py`, not by the agent; see [`docs/dnabert_s_retrieval.md`](docs/dnabert_s_retrieval.md) for why switching the agent over is a larger change than it looks.
 
 4. **Gap filling (rag/gap_filler.py)**  
    - Loads `AIRI-Institute/gena-lm-bigbird-base-t2t`.  

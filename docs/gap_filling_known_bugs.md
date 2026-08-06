@@ -457,22 +457,27 @@ artefact of scoring a low variety sequence with a metric that rewards variety.
 
 ---
 
-## A fourth problem, recorded but not investigated further
+## Scope: this is about the standalone scripts, not the agent
 
-`build_masked_input_with_context` in `src/rag/gap_filler.py`, which is the agent's path rather
-than the standalone scripts, has a different flaw.
+Everything above concerns `src/core/gap_filler.py` and `src/core/gap_filler_rag.py`, the
+standalone scripts. The LangChain agent path is unchanged from `main` and uses substring
+retrieval over `rag_corpus/`.
 
-It already places retrieved context in the right spot, immediately either side of the masks,
-which is better than what the RAG script does. But it finds that context by **exact text
-search**: it needs the query flank to appear character for character inside a retrieved record.
+Bugs 1 and 2 do not touch the agent at all. It computes no identity score, and it builds its
+model input with `build_masked_input_with_context` in `src/rag/gap_filler.py`, which already
+places context immediately either side of the masks rather than appending it at the end.
 
-That made sense when retrieval was itself an exact text search, because retrieval had already
-guaranteed the flank was in there. Since retrieval became similarity based, a record comes back
-because it *resembles* the query, not because it *contains* it. The search therefore fails every
-time, the error is caught and ignored, and the function quietly returns no context at all.
+Bug 3 does reach the agent, because `predict_until_length` is the same function there. If the
+filling loop is replaced, the shared version should be imported by all three call sites rather
+than copied a fourth time.
 
-The agent still runs. It simply gets no benefit from retrieval on that path. Fixing it means
-aligning the flank against the record rather than searching for it.
+One thing to watch if the agent is ever switched to similarity retrieval:
+`build_masked_input_with_context` finds its context by **exact text search**, needing the query
+flank to appear character for character inside a retrieved record. That works today because
+retrieval is itself an exact text search and has already guaranteed the flank is in there. Under
+similarity retrieval a record comes back for resembling the query rather than containing it, so
+the lookup fails every time, the error is caught and ignored, and the function silently returns
+no context. It is not a bug now. It would become one.
 
 Separately, `src/core/evaluation.py` cannot be imported at all: it needs the
 `python-Levenshtein` package, which is not installed and is not listed in `requirements.txt`.
