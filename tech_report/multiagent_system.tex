@@ -364,9 +364,50 @@ receives the full resources of an ARES compute node.}
 
 The effect is measurable. A similarity search that must first load DNABERT-S requires
 33.9~seconds; the identical search against the resident model requires 0.41~seconds, an
-improvement of a factor of \textbf{83}. In the single-agent pipeline the generator was
-reloaded on each invocation of the processing function, and the substring retriever re-read
-the entire 51~MB corpus from disk on every call.
+improvement of a factor of \textbf{83}.
+
+It is worth stating precisely how this differs from the single-agent pipeline, because the
+two paths behave differently. In the agent pipeline the generator is loaded at
+\textit{module scope} in \texttt{rag/gap\_filler.py}, and is therefore instantiated once
+per process rather than once per call:
+
+\begin{lstlisting}[language=Python]
+# rag/gap_filler.py
+MODEL_NAME = "AIRI-Institute/gena-lm-bigbird-base-t2t"
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)   # executed at import
+model = BigBirdForMaskedLM.from_pretrained(MODEL_NAME)  # executed at import
+model.eval()
+\end{lstlisting}
+
+Repeated invocations within one process therefore reuse the model, which is the desired
+behaviour. The cost of this construction lies elsewhere: importing the tools module
+instantiates a 450~MB model as a side effect, so the module cannot be imported for testing
+or inspection without loading it. The multi-agent design achieves the same residency
+explicitly, through a warm-up performed at agent startup and reported on a health endpoint,
+which additionally allows a caller to determine when the agent is ready.
+
+The genuine per-call cost in the agent pipeline is retrieval. \texttt{retrieve\_context()}
+calls \texttt{load\_all\_sequences()} on every invocation, re-reading the entire 51~MB
+corpus from disk:
+
+\begin{lstlisting}[language=Python]
+# rag/retriever.py
+def retrieve_context(user_input: str) -> str:
+    ...
+    all_seqs = load_all_sequences("rag/rag_corpus", exts=(".fna", ".fasta"))
+\end{lstlisting}
+
+Measured on this corpus, that scan costs 0.86~s on a cold page cache and 0.37~s thereafter,
+for all 37{,}645 records, on every single call. In the multi-agent system the corpus is
+indexed once at startup and accessed by record offset, so a lookup costs approximately
+50~microseconds.
+
+A third pattern appears in the standalone comparison script
+\texttt{src/core/gap\_filler\_rag.py}, which is not part of the agent pipeline. There the
+tokenizer and model are constructed inside \texttt{run\_pipeline()}, so they are rebuilt on
+each invocation of that function, which \texttt{main()} calls twice, once per experimental
+arm.
 
 \subsection{Enforcing Correctness: \texttt{runtime/state.py}}
 
@@ -643,9 +684,12 @@ are specialized agents, and that each agent owns the specific models its role re
 \subsubsection{Improvements arising from agent-specific models}
 
 \begin{itemize}
-    \item \textbf{Surrogate models remain resident}: loading occurs once per agent rather than
-    once per request, yielding similarity searches 83 times faster than those requiring a cold
-    model load.
+    \item \textbf{Surrogate models are loaded explicitly and their readiness is
+    observable}: each agent warms its models at startup and reports \texttt{models\_loaded}
+    on a health endpoint, rather than loading them as a side effect of importing a module.
+    A resident embedder answers a similarity search in 0.41~s against 33.9~s for a cold
+    load, and the reference corpus is indexed once rather than re-read on every retrieval
+    call, which in the agent pipeline costs 0.37~s per invocation over 37{,}645 records.
 
     \item \textbf{Each model is co-located with the data it requires}: the embedder resides with
     the index constructed from it, so their correspondence is an internal invariant rather than
@@ -681,7 +725,7 @@ Window utilization     & approximately 11\%            & 91\%, i.e. 2{,}942 toke
 Context reaching model & silently truncated            & 2{,}942 tokens, verified per execution \\
 Tool ordering          & requested in the prompt       & precondition on every tool \\
 Genomic payload        & passes through the prompt     & structured data, never in a prompt \\
-Model loading          & per invocation                & once per agent, 83$\times$ faster \\
+Model loading          & at import; corpus re-read per call & once at startup, health-gated \\
 Memory                 & 2.4\,GB in one process        & 0.12 / 1.0 / 1.2\,GB across nodes \\
 Available cores        & 40, shared by all roles       & 120, forty per role \\
 Failure isolation      & terminates the execution      & confined to one agent \\
