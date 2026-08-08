@@ -277,7 +277,7 @@ surrogates are invoked and with which parameters.
 
 \subsubsection{Retrieval Agent: \texttt{agents/retrieval.py}}
 
-This agent hosts two surrogate models.
+This agent hosts one surrogate models.
 
 \begin{itemize}
     \item \textbf{DNABERT-S, a surrogate for sequence alignment}: determining whether two
@@ -289,14 +289,6 @@ This agent hosts two surrogate models.
     from different organisms are separated, which is precisely the property a similarity
     search requires.
 
-    \item \textbf{FAISS HNSW, a surrogate for exhaustive search}: identifying the nearest
-    embedding exactly requires 43{,}575 comparisons. FAISS constructs a navigable
-    small-world graph and traverses it greedily, visiting only a small fraction of the
-    records. This is an approximate nearest-neighbour search, and its approximate nature is
-    visible in practice: restricting the search with a sparse identifier selector causes the
-    traversal to return no results at all, because the greedy walk cannot reach a sufficient
-    number of permitted nodes. The implementation therefore over-fetches and filters
-    afterwards.
 \end{itemize}
 
 The correctness of the retrieval surrogate was verified by querying the index with reference
