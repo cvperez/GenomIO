@@ -271,13 +271,21 @@ async def measure_budget(args: dict, state: ReconTask) -> dict:
 A defining property of the multi-agent design, and the principal difference from the
 single-agent pipeline, is that each agent hosts the specific models its role requires and no
 others. These are \textit{surrogate models}: trained networks that stand in for computations
-that are exact in principle but prohibitively expensive to perform directly. The language
-model inside each agent performs none of this scientific computation; it decides when the
-surrogates are invoked and with which parameters.
+that are exact in principle but prohibitively expensive to perform directly. The retrieval
+agent hosts one, DNABERT-S, and the reconstruction agent hosts the other, GENA-LM, while the
+coordinator hosts none. The language model inside each agent performs none of this scientific
+computation; it decides when the surrogates are invoked and with which parameters.
+
+The retrieval agent additionally holds a FAISS index. This is an approximate
+nearest-neighbour structure rather than a trained model, so it is not a surrogate in the
+sense used here, but it is subject to the same practical consideration: restricting its
+search with a sparse identifier selector causes the graph traversal to return no results at
+all, because the greedy walk cannot reach a sufficient number of permitted nodes. The
+implementation therefore over-fetches and filters afterwards.
 
 \subsubsection{Retrieval Agent: \texttt{agents/retrieval.py}}
 
-This agent hosts one surrogate models.
+This agent hosts one surrogate model.
 
 \begin{itemize}
     \item \textbf{DNABERT-S, a surrogate for sequence alignment}: determining whether two
@@ -322,7 +330,7 @@ that the caller could only accept or lose in their entirety.
 
 \subsubsection{Reconstruction Agent: \texttt{agents/reconstruction.py}}
 
-This agent hosts the third surrogate, GENA-LM BigBird, the same masked language model used in
+This agent hosts the second surrogate model, GENA-LM BigBird, the same one used in
 the single-agent pipeline. It stands in for the true sequence of the gap, which could
 otherwise be obtained only by resequencing the organism, by producing the nucleotides that
 are most plausible given the surrounding context.
