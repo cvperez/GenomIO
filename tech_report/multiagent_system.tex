@@ -29,7 +29,9 @@ subtasks such as context retrieval, sequence generation and validation among coo
 peers \cite{li2024survey}. This section realizes that extension. We describe a genuine
 multi-agent system in which three specialized agents, each deployed on a separate compute
 node of the ARES cluster and each owning the specific models its role requires, cooperate
-to fill the same gaps.
+to fill the same gaps. Although three agents constitute a minimal configuration, it is the
+smallest one that exercises every mechanism a larger distributed deployment would require,
+and Section~\ref{subsec:mas-scaling} examines what generalizes from it.
 
 The motivation is not distribution for its own sake. Evaluating the single-agent pipeline
 revealed a class of defect that the pipeline is structurally incapable of detecting:
@@ -741,6 +743,84 @@ Unit and contract tests                 & 154, in 3\,s \\
 \caption{Operating characteristics of the three-node deployment.}
 \label{tab:cost}
 \end{table}
+
+\subsection{Towards a Larger Distributed Multi-Agent System}
+\label{subsec:mas-scaling}
+
+The three-node deployment described here is deliberately minimal, but it is not a special
+case. It is the smallest configuration that exercises every mechanism a larger distributed
+multi-agent system would require, and it therefore constitutes an initial approach to
+systems in which many agents, each with its own models and its own hardware requirements,
+are distributed across a much larger set of machines.
+
+Several properties of the implementation are independent of the number of agents.
+
+\begin{itemize}
+    \item \textbf{No component knows how many agents exist}: agents address one another by
+    endpoint, and each publishes an agent card describing its identity and skills. Nothing
+    in the agent code refers to a fixed topology, and adding a fourth role would consist of
+    writing its tools and registering its endpoint.
+
+    \item \textbf{Placement is derived, not declared}: the deployment script queries the
+    SLURM allocation, assigns one role per node and computes each endpoint. Node names are
+    never hard-coded, so the same script operates over any allocation the scheduler
+    provides.
+
+    \item \textbf{The transport imposes no shared infrastructure}: communication is HTTP
+    with JSON payloads. There is no message broker, no shared memory segment and no central
+    coordinating process. Two agents require only mutual network reachability, which means
+    they need not reside on the same cluster.
+
+    \item \textbf{The protocol is an open standard}: because agents interoperate through
+    A2A and declare their capabilities through MCP, an agent may be replaced by an
+    implementation written in a different language or built on a different framework
+    without modifying its peers. This is the property that makes heterogeneous, multi-team
+    deployments feasible.
+
+    \item \textbf{Divergence between distributed copies is already anticipated}: the corpus
+    fingerprint exchanged before delegation exists precisely because two agents hold
+    independent copies of the reference data. That check becomes more valuable, not less,
+    as the number of machines increases.
+\end{itemize}
+
+The deployment also demonstrates heterogeneous resource allocation, which is the principal
+motivation for distributing a scientific multi-agent system in the first place. The three
+agents differ by an order of magnitude in memory footprint and by more than a factor of ten
+in startup cost, and each receives hardware appropriate to its role. This generalizes
+directly: a larger system could place a generation agent on a GPU node, several retrieval
+agents on memory-rich CPU nodes, and lightweight policy agents on whatever capacity remains,
+with each agent loading only the models its role demands.
+
+Two extensions follow naturally from the present design. The retrieval agent could be
+replicated, since its ranked pools are held per request and independent of one another, with
+requests distributed across replicas. Independently, multiple gaps could be processed
+concurrently, as retrieval can serve one request while reconstruction generates for another;
+the negotiation loop already tolerates this, although it was not evaluated here.
+
+Three limitations would need to be addressed before the system could be described as
+scaling to a large number of agents.
+
+\begin{itemize}
+    \item \textbf{Discovery is static}: endpoints are computed by the deployment script and
+    supplied at startup. A2A defines the agent card but not a registry, so a larger
+    deployment would require a discovery service through which agents announce themselves
+    and are located dynamically.
+
+    \item \textbf{Communication is point-to-point}: with $N$ agents the number of potential
+    direct connections grows quadratically. Beyond a modest number of agents this motivates
+    an intermediary such as an agent gateway, which would also provide a natural place for
+    authentication and routing policy.
+
+    \item \textbf{There is no authentication}: the current deployment relies on the ARES
+    compute nodes being unreachable from outside the allocation. Any deployment spanning
+    administrative domains would require the security schemes that A2A defines and that this
+    implementation declares as empty.
+\end{itemize}
+
+None of these limitations affects the results reported above, since all three agents operate
+within a single trusted allocation. They delimit the path from the present three-node
+configuration to a genuinely large distributed system rather than qualifying what has been
+demonstrated.
 
 \subsection{Outcome and Limitations}
 
