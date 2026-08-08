@@ -1,416 +1,194 @@
 % =====================================================================
-%  GenomIO: A Three Node Multi-Agent System for Genomic Gap Filling
-%  Thesis chapter. Compile with:  pdflatex multiagent_system.tex  (twice)
+%  Chapter fragment: Multi-Agent System for Genomic Gap Prediction
+%
+%  Written to be \input{} into the main tech report, in the same style as the
+%  preceding "Agent-Based Pipeline for Genomic Gap Prediction" section.
+%
+%  Requires in the main preamble:
+%      \usepackage{graphicx}  \usepackage{booktabs}  \usepackage{listings}
+%      \usepackage{float}     \usepackage{tikz}
+%      \usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
+%
+%  Citation keys reused from the existing bibliography: li2024survey.
+%  Keys to be added to the .bib file:
+%      a2aspec  (Agent2Agent protocol specification, Linux Foundation AI & Data)
+%      mcpspec  (Model Context Protocol specification)
 % =====================================================================
-\documentclass[11pt,a4paper]{article}
 
-\usepackage[utf8]{inputenc}
-\usepackage[T1]{fontenc}
-\usepackage[english]{babel}
-\usepackage[margin=2.5cm]{geometry}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{multirow}
-\usepackage{xcolor}
-\usepackage{listings}
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{tikz}
-\usepackage{caption}
-\usepackage{float}
-\usepackage[hidelinks]{hyperref}
+\section{From an Agent Pipeline to a Multi-Agent System}
 
-\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds,shapes.geometric}
+The previous section presented an agent-based pipeline in which a single LangChain agent
+orchestrates two tools, \texttt{context\_tool} and \texttt{gap\_filler\_tool}, to solve the
+gap-filling task. That design established the value of tool-mediated decomposition, but it
+remains a \textit{single-agent} architecture: one planner, one language model and one
+process hold every responsibility in the workflow.
 
-% =============================================================== colours
-\definecolor{codebg}{RGB}{248,248,246}
-\definecolor{codeframe}{RGB}{210,210,205}
-\definecolor{kw}{RGB}{0,90,160}
-\definecolor{str}{RGB}{160,60,30}
-\definecolor{cmt}{RGB}{110,120,110}
-\definecolor{nodeA}{RGB}{222,235,247}
-\definecolor{nodeB}{RGB}{226,240,226}
-\definecolor{nodeC}{RGB}{250,238,222}
-\definecolor{edgecol}{RGB}{60,60,60}
+In introducing that pipeline we noted that multi-agent systems extend the agent paradigm by
+allowing several specialized agents to collaborate, exchange information and distribute
+subtasks such as context retrieval, sequence generation and validation among cooperating
+peers \cite{li2024survey}. This section realizes that extension. We describe a genuine
+multi-agent system in which three specialized agents, each deployed on a separate compute
+node of the ARES cluster and each owning the specific models its role requires, cooperate
+to fill the same gaps.
 
-% =============================================================== listings
-\lstdefinestyle{py}{
-  language=Python,
-  backgroundcolor=\color{codebg},
-  basicstyle=\ttfamily\footnotesize,
-  keywordstyle=\color{kw}\bfseries,
-  stringstyle=\color{str},
-  commentstyle=\color{cmt}\itshape,
-  numbers=left, numberstyle=\tiny\color{gray}, numbersep=8pt,
-  frame=single, rulecolor=\color{codeframe},
-  breaklines=true, breakatwhitespace=true,
-  showstringspaces=false,
-  captionpos=b,
-  xleftmargin=14pt, framexleftmargin=14pt,
-  tabsize=4,
-}
-\lstdefinestyle{sh}{
-  language=bash,
-  backgroundcolor=\color{codebg},
-  basicstyle=\ttfamily\footnotesize,
-  keywordstyle=\color{kw},
-  commentstyle=\color{cmt}\itshape,
-  frame=single, rulecolor=\color{codeframe},
-  breaklines=true, showstringspaces=false, captionpos=b,
-  xleftmargin=6pt, framexleftmargin=6pt,
-}
-\lstdefinestyle{js}{
-  backgroundcolor=\color{codebg},
-  basicstyle=\ttfamily\footnotesize,
-  stringstyle=\color{str},
-  frame=single, rulecolor=\color{codeframe},
-  breaklines=true, showstringspaces=false, captionpos=b,
-  xleftmargin=6pt, framexleftmargin=6pt,
-}
-\lstset{style=py}
+The motivation is not distribution for its own sake. Evaluating the single-agent pipeline
+revealed a class of defect that the pipeline is structurally incapable of detecting:
+because one process holds every responsibility, constraints that relate two of those
+responsibilities are never expressed anywhere, and therefore never validated. The
+multi-agent design forces those constraints across an interface, where they become
+measurable. As shown in Section~\ref{subsec:mas-improvements}, the quantity that determined
+whether retrieval augmentation functioned at all was never computed in the single-agent
+pipeline, and becomes a measured, transmitted and verified value in the multi-agent one.
 
-\newcommand{\code}[1]{\texttt{\small #1}}
+\subsection{Motivation: Limitations of the Single-Agent Pipeline}
+\label{subsec:mas-motivation}
 
-% =====================================================================
-\title{\textbf{A Three Node Multi-Agent System for\\Genomic Gap Filling}\\[4pt]
-       \large Design, Implementation and Evaluation on the ARES Cluster}
-\author{GenomIO}
-\date{August 2026}
+Five limitations of the agent-based pipeline motivated the redesign. Each is addressed by a
+specific architectural decision described later in this section.
 
-\begin{document}
-\maketitle
+\begin{itemize}
+    \item \textbf{Tool ordering was requested, not enforced}: the system prompt instructed
+    the agent to call \texttt{context\_tool} before \texttt{gap\_filler\_tool}, but
+    \texttt{AgentExecutor} imposes no ordering, sets no iteration limit and provides no
+    failure handling. Nothing in the code verified that the requested sequence was
+    followed.
 
-\begin{abstract}
-\noindent
-This chapter describes the redesign of the GenomIO gap filling pipeline as a multi-agent
-system. The previous version was a single process that chained retrieval and
-prediction together through a language model. The new version is three independent agents, each running on
-its own compute node of the ARES cluster, communicating over the Agent2Agent (A2A)
-protocol, with every capability exposed as a Model Context Protocol (MCP) tool.
+    \item \textbf{The genomic payload passed through the language model}: the nucleotide
+    string was interpolated into the prompt and the model was expected to reproduce it
+    verbatim as an argument to the second tool. No checksum or length assertion protected
+    it in transit.
 
-Each agent hosts a \emph{surrogate model}, a trained network standing in for a
-computation that is exact but too slow to perform directly. The retrieval agent holds two:
-DNABERT-S, which replaces letter by letter sequence alignment with a comparison of short
-numeric vectors, and an approximate nearest neighbour index which replaces exhaustive
-search over 43{,}575 references. The reconstruction agent holds GENA-LM, which stands in
-for the unknown true sequence. The language model inside each agent performs none of this
-work; it decides when the surrogates are invoked and with what parameters.
+    \item \textbf{Retrieval returned no matches}: \texttt{retrieve\_context()} performs a
+    substring search rather than a similarity search, using Python's \texttt{in} operator.
+    Measured over the full corpus of 37{,}645 records with the 50~bp flanks used by the
+    test harness, this returns \textbf{zero} exact matches and zero partial matches. The
+    retrieval-augmented condition was therefore indistinguishable from the condition
+    without retrieval.
 
-The motivation was not distribution for its own sake. The previous pipeline contained a
-defect that no test could detect: the reference sequences it retrieved were silently
-discarded before the prediction model ever saw them, while the run was still recorded as
-retrieval augmented. The cause was that the component knowing the model's input budget and
-the component choosing the references were the same function, so the constraint linking
-them was never written down. Separating them onto different machines forces that quantity
-into a message, where it is necessarily measured and recorded.
+    \item \textbf{Retrieved context was discarded before inference}: the masked input was
+    assembled as \texttt{\{left\} [MASKS] \{right\}\textbackslash n\textbackslash n\# Context:
+    \{retrieved\}} and then tokenized with \texttt{truncation=True, max\_length=4096}.
+    Because truncation removes tokens from the end, the retrieved context was the first
+    content to be deleted. No error was raised, the execution completed, and the result was
+    recorded as RAG-enabled.
 
-Running the same test case as the original pipeline, gap number one of accession
-AP012051.1, the new system reports that 2{,}942 tokens of retrieved reference sequence
-reached the prediction model, out of a measured budget of 3{,}236. The previous pipeline
-reported nothing, and would have delivered zero.
+    \item \textbf{The test harness selected non-adjacent contigs}: \texttt{test.py} used
+    \texttt{contigs[0]} and \texttt{contigs[1]}. As the FASTA file is sorted by descending
+    length, these are \texttt{contig31} (190{,}651~bp, genomic position 1{,}298{,}041 to
+    1{,}488{,}692) and \texttt{contig22} (167{,}069~bp, position 898{,}138 to
+    1{,}065{,}207), two contigs that are not adjacent and between which no gap exists.
+\end{itemize}
 
-The improvements are infrastructural and are set out in Section~\ref{sec:mas}. They fall
-into two groups: those that follow from having specific agents, such as a budget that must
-cross an interface and therefore gets recorded, rules enforced at that interface, failures
-that stay where they happen and a run that can be audited across machines; and those that
-follow from each agent owning the specific models its role requires, such as searches that
-run 83 times faster because the embedder is already resident, and three components with
-very different memory and startup costs each receiving a node that suits it.
-\end{abstract}
+The fourth limitation is the one that dictates the architecture that follows. The component
+that knew the token budget of the masked language model and the component that selected the
+reference sequences were the same function. Consequently, the constraint relating them was
+never expressed: the number of retrieved records was the constant \texttt{k=2}, chosen
+without reference to the available context window. A value that never crosses a component
+boundary is never validated, never logged and never reported.
 
-\tableofcontents
-\newpage
+\subsection{Overview and Architecture}
+\label{subsec:mas-architecture}
 
-% =====================================================================
-\section{The problem, in plain terms}
-\label{sec:problem}
-
-\subsection{What a genome gap is}
-
-A genome is a very long text written in an alphabet of four letters: A, C, G and T. When
-biologists sequence an organism, the machine cannot read the whole text at once. It reads
-many short fragments, and software then assembles those fragments into longer pieces
-called \emph{contigs}, from the word contiguous.
-
-The assembly is rarely complete. Between two neighbouring contigs there is often a
-stretch that no fragment covered. That stretch is a \emph{gap}. We know roughly how long
-it is, we know the sequence immediately to its left and to its right, but we do not know
-what letters go inside it.
-
-\begin{center}
-\begin{tikzpicture}[scale=1]
-  \draw[fill=nodeA,draw=black!50] (0,0) rectangle (4.2,0.55);
-  \node at (2.1,0.275) {\small left contig, 5{,}951 letters};
-  \draw[fill=black!8,draw=black!40,dashed] (4.4,0) rectangle (6.6,0.55);
-  \node at (5.5,0.275) {\small\itshape gap, 870};
-  \draw[fill=nodeB,draw=black!50] (6.8,0) rectangle (11.5,0.55);
-  \node at (9.15,0.275) {\small right contig, 13{,}996 letters};
-  \draw[<->,thick] (4.4,-0.35) -- (6.6,-0.35);
-  \node at (5.5,-0.7) {\footnotesize what we must predict};
-\end{tikzpicture}
-\end{center}
-
-\emph{Gap filling} is the task of predicting the missing letters. Throughout this chapter
-the running example is the first gap of the bacterial genome with accession AP012051.1.
-It is 870 letters long, it sits between two contigs of 5{,}951 and 13{,}996 letters, and
-because this is a simulated draft genome we know the true answer and can check any
-prediction against it.
-
-\subsection{How a language model can help}
-
-Two ideas are combined.
-
-The first is a \textbf{prediction model}. GENA-LM is a neural network trained on DNA in
-the same way that a text model is trained on English: hide some letters and learn to
-guess them from the surrounding context. To fill a gap we hand it the left contig, a run
-of blanks, and the right contig, and ask it to fill the blanks. Its input is limited to
-4{,}096 \emph{tokens}, where a token is a short group of letters that the model treats as
-one unit. In our data one token is worth roughly six letters of DNA.
-
-The second is \textbf{retrieval}. Before predicting, we look in a reference library of
-43{,}575 known genes for sequences that resemble the region around the gap, and we place
-those in the model's input as extra evidence. The reasoning is that a gene similar to the
-one being reconstructed tells the model what such a sequence usually looks like. Finding
-similar sequences quickly is done by converting each one into a list of 768 numbers, an
-\emph{embedding}, using a model called DNABERT-S, and then searching for the closest
-lists with a library called FAISS. This combination of retrieval and generation is
-commonly called RAG, for retrieval augmented generation.
-
-The whole difficulty of this chapter lies in one sentence: \textbf{the retrieved evidence
-is only useful if it actually reaches the prediction model}, and in the previous system
-it did not.
-
-% =====================================================================
-\section{The previous pipeline}
-\label{sec:old}
-
-\subsection{What it was}
-
-The earlier system was a single Python process built with the LangChain library. A user
-called a function \code{plan()} with the sequence and the gap length. That function
-created an \emph{agent}: a language model, Gemini 2.5 Flash, given a written instruction
-and two tools it could choose to call.
+The multi-agent system distributes the workflow across three agents, each responsible for
+one phase of the task and each hosting the specific models that phase requires. Agents
+communicate using the Agent2Agent (A2A) protocol over HTTP, and every capability an agent
+exposes is declared as a Model Context Protocol (MCP) tool.
 
 \begin{figure}[H]
-\centering
-\begin{tikzpicture}[
-  box/.style={draw=black!55, rounded corners=2pt, align=center,
-              minimum height=1.05cm, inner xsep=6pt, font=\small},
-  ar/.style={-{Stealth[length=2.6mm]}, thick, draw=edgecol},
-]
-  \node[box, fill=black!5, minimum width=3.1cm] (t) {\code{test.py}\\[1pt]
-        \scriptsize builds ``50 letters \code{-{}-{}-} 50 letters''};
-  \node[box, fill=nodeA, minimum width=3.6cm, right=1.5cm of t] (p)
-        {\textbf{planner.py}\\[1pt]\scriptsize LangChain agent\\\scriptsize Gemini 2.5 Flash};
-  \node[box, fill=nodeB, minimum width=3.4cm, above right=0.35cm and 1.5cm of p] (r)
-        {\code{context\_tool}\\[1pt]\scriptsize substring search\\\scriptsize over \code{rag\_corpus/}};
-  \node[box, fill=nodeC, minimum width=3.4cm, below right=0.35cm and 1.5cm of p] (g)
-        {\code{gap\_filler\_tool}\\[1pt]\scriptsize GENA-LM prediction};
+    \centering
+    \begin{tikzpicture}[
+      agent/.style={draw=black!60, rounded corners=3pt, align=center,
+                    minimum width=5.4cm, minimum height=1.75cm, font=\small},
+      machine/.style={draw=black!35, dashed, rounded corners=4pt, inner sep=9pt},
+      ar/.style={-{Stealth[length=3mm]}, very thick},
+      lbl/.style={font=\scriptsize, fill=white, inner sep=2pt},
+    ]
+      \node[agent, fill=blue!8] (co)
+        {\textbf{Coordinator Agent}\\[2pt]
+         \scriptsize no scientific models\\
+         \scriptsize query construction, acceptance gate};
+      \node[agent, fill=orange!10, below=2.0cm of co] (re)
+        {\textbf{Reconstruction Agent}\\[2pt]
+         \scriptsize GENA-LM BigBird\\
+         \scriptsize token budget, sequence generation};
+      \node[agent, fill=green!8, below=2.0cm of re] (rt)
+        {\textbf{Retrieval Agent}\\[2pt]
+         \scriptsize DNABERT-S + FAISS\\
+         \scriptsize 43{,}575 reference genes};
 
-  \draw[ar] (t) -- (p);
-  \draw[ar] (p.east) -- node[above,font=\scriptsize,pos=0.45]{1st} (r.west);
-  \draw[ar] (p.east) -- node[below,font=\scriptsize,pos=0.45]{2nd} (g.west);
+      \node[machine, fit=(co), label={[font=\scriptsize\ttfamily]above:ares-comp-10}] {};
+      \node[machine, fit=(re), label={[font=\scriptsize\ttfamily]above:ares-comp-12}] {};
+      \node[machine, fit=(rt), label={[font=\scriptsize\ttfamily]above:ares-comp-11}] {};
 
-  \begin{scope}[on background layer]
-    \node[draw=black!30, dashed, rounded corners, fit=(p)(r)(g),
-          inner sep=9pt, label={[font=\scriptsize\itshape]below:one process}] {};
-  \end{scope}
-\end{tikzpicture}
-\caption{The previous pipeline. One process, one language model, two tools. The ordering
-of the two tool calls was requested in the written instruction, not enforced.}
-\label{fig:old}
+      \draw[ar] ($(co.south)+(-0.8,0)$) -- node[lbl,left]{\texttt{message/send}}
+                ($(re.north)+(-0.8,0)$);
+      \draw[ar] ($(re.north)+(0.8,0)$) -- node[lbl,right]{filled sequence}
+                ($(co.south)+(0.8,0)$);
+      \draw[ar] ($(re.south)+(-0.8,0)$) -- node[lbl,left]{request $N$ candidates}
+                ($(rt.north)+(-0.8,0)$);
+      \draw[ar] ($(rt.north)+(0.8,0)$) -- node[lbl,right]{row IDs and scores}
+                ($(re.south)+(0.8,0)$);
+
+      \node[font=\scriptsize\itshape, right=0.2cm of rt.east, text width=2.9cm]
+           {negotiation loop, repeated until the window is full};
+
+      \node[left=1.3cm of co, font=\small] (u) {\texttt{test.py}};
+      \draw[ar] (u) -- (co);
+    \end{tikzpicture}
+    \caption{Multi-agent architecture. Each agent runs on a dedicated ARES compute node and
+    owns the models its role requires. The bidirectional link between the reconstruction and
+    retrieval agents is a negotiation over the available token budget, not a single pipeline
+    step. Compare with Figure~\ref{fig:agent-architecture}, where all responsibilities reside
+    in one planner.}
+    \label{fig:mas-architecture}
 \end{figure}
 
-The written instruction said, in part:
+The three agents are the following:
 
-\begin{quote}\ttfamily\small
-You MUST use these tools in the correct order:\\
-1) context\_tool\\
-2) gap\_filler\_tool
-\end{quote}
+\begin{itemize}
+    \item \textbf{Coordinator Agent}: executes policy rather than science. It loads no
+    scientific models, constructs the retrieval query from the flanking contigs, verifies
+    that its peers are operational and reading the same reference corpus, delegates the
+    task, and applies an acceptance gate to the result.
 
-\subsection{Why it did not work}
+    \item \textbf{Retrieval Agent}: owns the DNABERT-S embedder and the FAISS index over
+    43{,}575 coding sequences. It answers requests for candidates with corpus row
+    identifiers and cosine similarity scores, never with nucleotide sequences.
 
-Five problems were found by inspection and by measurement. They are listed here because
-each one motivates a specific decision in the new design.
+    \item \textbf{Reconstruction Agent}: owns the GENA-LM masked language model. Because it
+    owns the tokenizer, it is the only component able to measure the available context
+    budget, and it therefore drives the negotiation and performs the final prediction.
+\end{itemize}
 
-\paragraph{1. The ordering was a request, not a rule.}
-The instruction above is ordinary English addressed to a language model. Nothing in the
-code checked it. The LangChain executor imposed no ordering, set no limit on the number
-of steps and had no failure handling. The model could have called the prediction tool
-without retrieving anything, or looped, and nothing would have noticed.
+\subsection{Agent Communication: the A2A Protocol}
 
-\paragraph{2. The DNA travelled through the language model.}
-The nucleotide string was written into the prompt, and the model was expected to type it
-back out as an argument to the second tool. The scientific payload therefore passed
-through text generation, with no checksum and no length check. At the 50 letter flanks
-actually used this survived, but nothing guaranteed it.
+The A2A protocol defines how one agent requests work from another over standard HTTP with
+JSON payloads, which removes the need for a message broker or a central coordinating
+process. Three of its mechanisms are used here.
 
-\paragraph{3. Retrieval found nothing.}
-The retrieval tool did not perform a similarity search. It used Python's \code{in}
-operator, so a reference gene counted as a match only if the query appeared inside it
-character for character. Measured against the real query for gap number one, over the
-whole 37{,}645 record library:
+\begin{itemize}
+    \item \textbf{Agent Card}: each agent publishes a discovery document at
+    \texttt{/.well-known/agent-card.json} declaring its identity, its skills and the
+    optional protocol features it supports. Our agents additionally publish a fingerprint
+    of the reference corpus they have loaded, under the metadata key
+    \texttt{x-corpus-fingerprint}.
 
-\begin{center}
-\begin{tabular}{lcc}
-\toprule
-Query flank length & Records containing both flanks & Records containing either \\
-\midrule
-50 letters & 0 & 0 \\
-20 letters & 0 & 0 \\
-12 letters & 1 & 18 \\
-\bottomrule
-\end{tabular}
-\end{center}
+    \item \textbf{Tasks}: a unit of work is a task with a unique identifier and a lifecycle.
+    The specification defines nine states; our agents traverse \texttt{submitted},
+    \texttt{working} and then \texttt{completed} or \texttt{failed}. A task in a terminal
+    state cannot be restarted, which makes each execution auditable after the fact.
 
-At the 50 letter flank the pipeline actually used, retrieval returned nothing at all. The
-retrieval augmented arm of the experiment was therefore identical to the arm without
-retrieval, though the results were labelled otherwise.
+    \item \textbf{Messages and Artifacts}: requests carry typed parts. We use
+    \texttt{DataPart} for structured JSON and \texttt{TextPart} for prose, and results are
+    returned as artifacts containing both. All information the system depends upon travels
+    in the \texttt{DataPart}; the prose is advisory and is consumed by nothing.
+\end{itemize}
 
-\paragraph{4. The retrieved evidence was discarded before the model saw it.}
-This is the most consequential problem, and it lived in the standalone comparison script
-rather than the agent. The input was assembled as
-\begin{center}
-\code{\{left contig\} [MASKS] \{right contig\}}\verb|\n\n|\code{\# Context: \{retrieved\}}
-\end{center}
-and then tokenised with truncation enabled at 4{,}096 tokens. Truncation removes from the
-\emph{end}. The retrieved evidence was therefore the first thing deleted. No error was
-raised; the run completed and the result was recorded as retrieval augmented.
+An abbreviated request from the coordinator to the reconstruction agent is shown below. The
+contigs travel as structured data and are never rendered into a prompt, in contrast to the
+single-agent pipeline, where the sequence was interpolated into the prompt text.
 
-\paragraph{5. The test selected the wrong contigs.}
-The test script took the first and second entries of the contig file. That file is sorted
-from longest to shortest, so the first two entries are contig number 31 (190{,}651
-letters, at genome position 1{,}298{,}041 to 1{,}488{,}692) and contig number 22
-(167{,}069 letters, at position 898{,}138 to 1{,}065{,}207). These two are not adjacent
-to each other and have no gap between them. They were nonetheless passed alongside the
-870 letter target belonging to gap number one, whose true neighbours are contig number 1
-and contig number 2.
-
-\subsection{The state of the code}
-
-Independently of the design, the previous pipeline could not be executed at all. The
-retrieval module opened a directory named \code{rag/rag\_corpus}, which does not exist
-(the library is at \code{rag\_corpus} in the project root), so the first tool call raised
-a file not found error. The test script read the data from a path missing its
-\code{data/} prefix. The three modules required three mutually incompatible import roots.
-The LangChain packages were not installed and no API key was configured.
-
-% =====================================================================
-\section{The new system}
-\label{sec:new}
-
-\subsection{The central idea}
-
-The fourth problem above, the discarded evidence, has a specific cause. The component
-that knows the token budget (the prediction model) and the component that chooses the
-reference sequences (the retrieval search) were the same piece of code. Because there was
-no boundary between them, the constraint linking them was never written down. The number
-of sequences retrieved was a constant, \code{k = 2}, chosen with no reference to how much
-room the model actually had.
-
-The new design separates them into different processes on different machines. Once they
-are apart, they cannot share the assumption implicitly. They have to exchange it, and the
-exchange is measurable.
-
-\begin{quote}
-\textbf{Neither agent can answer the question alone.} Retrieval knows which reference
-sequences are most similar, but not how much space is left in the prediction model's
-input. Reconstruction knows exactly how much space is left, but has no access to the
-reference library. The answer to ``how many references fit?'' must be negotiated.
-\end{quote}
-
-\subsection{The three agents}
-
-\begin{description}
-\item[Coordinator.] Executes policy, not science. It loads no models. It cuts the query
-  out of the two contigs, checks that its two peers are alive and reading the same
-  reference library, delegates the work, and applies an acceptance check to whatever
-  comes back.
-\item[Retrieval agent.] Owns DNABERT-S and the FAISS index of 43{,}575 reference genes.
-  It answers a request for candidates with \emph{row numbers and similarity scores},
-  never with DNA.
-\item[Reconstruction agent.] Owns GENA-LM. Because it owns the model, it is the only
-  component that can measure the token budget, so it drives the negotiation and performs
-  the final prediction.
-\end{description}
-
-\begin{figure}[H]
-\centering
-\begin{tikzpicture}[
-  node distance=1cm,
-  agent/.style={draw=black!60, rounded corners=3pt, align=center,
-                minimum width=5.0cm, minimum height=1.9cm, font=\small},
-  machine/.style={draw=black!35, dashed, rounded corners=4pt, inner sep=10pt},
-  ar/.style={-{Stealth[length=3mm]}, very thick, draw=edgecol},
-  lbl/.style={font=\scriptsize, fill=white, inner sep=2pt},
-]
-  \node[agent, fill=nodeA] (co)
-    {\textbf{Coordinator}\\[2pt]
-     \scriptsize no models, ready in 2 s\\
-     \scriptsize cuts the query, applies the gate};
-  \node[agent, fill=nodeC, below=2.1cm of co] (re)
-    {\textbf{Reconstruction agent}\\[2pt]
-     \scriptsize GENA-LM, ready in 3 s\\
-     \scriptsize measures the budget, predicts};
-  \node[agent, fill=nodeB, below=2.1cm of re] (rt)
-    {\textbf{Retrieval agent}\\[2pt]
-     \scriptsize DNABERT-S + FAISS, ready in 30 s\\
-     \scriptsize 43{,}575 reference genes};
-
-  \node[machine, fit=(co), label={[font=\scriptsize\ttfamily]above:ares-comp-10}] {};
-  \node[machine, fit=(re), label={[font=\scriptsize\ttfamily]above:ares-comp-12}] {};
-  \node[machine, fit=(rt), label={[font=\scriptsize\ttfamily]above:ares-comp-11}] {};
-
-  \draw[ar] ($(co.south)+(-0.7,0)$) -- node[lbl,left]{A2A \code{message/send}}
-            ($(re.north)+(-0.7,0)$);
-  \draw[ar] ($(re.north)+(0.7,0)$) -- node[lbl,right]{the filled sequence}
-            ($(co.south)+(0.7,0)$);
-
-  \draw[ar] ($(re.south)+(-0.7,0)$) -- node[lbl,left]{``send me N candidates''}
-            ($(rt.north)+(-0.7,0)$);
-  \draw[ar] ($(rt.north)+(0.7,0)$) -- node[lbl,right]{row numbers + scores}
-            ($(re.south)+(0.7,0)$);
-
-  \node[font=\scriptsize\itshape, right=0.25cm of rt.east, text width=3.1cm]
-       {repeated until the input window is full or the candidate pool is empty};
-
-  \node[left=1.4cm of co, font=\small] (user) {\code{test.py}};
-  \draw[ar] (user) -- (co);
-\end{tikzpicture}
-\caption{The three node deployment. Each agent runs on its own ARES compute node. The
-double arrow between reconstruction and retrieval is the negotiation, and it repeats
-several times per run.}
-\label{fig:new}
-\end{figure}
-
-\subsection{How the agents talk: A2A}
-
-The Agent2Agent protocol defines how one agent asks another to do something. It is
-ordinary HTTP with JSON messages, which is why no message broker or central server is
-needed. Three parts of it matter here.
-
-\paragraph{The agent card.} Every agent publishes a description of itself at a fixed
-address, \code{/.well-known/agent-card.json}. It states the agent's name, what it can do
-(its \emph{skills}), and which optional protocol features it supports. Our agents also
-publish a fingerprint of the reference library they are reading, which the coordinator
-compares between the two peers before delegating. If they disagree, a row number would
-mean a different gene to each of them, and every result would be wrong in a way nothing
-would detect.
-
-\paragraph{Tasks.} A unit of work is a \emph{task} with an identity and a lifecycle. The
-protocol defines nine states; our agents move through \code{submitted}, \code{working}
-and then either \code{completed} or \code{failed}. A finished task can never be restarted,
-which is what makes a run auditable afterwards.
-
-\paragraph{Messages and artifacts.} A request carries \emph{parts}. We use two kinds: a
-\code{DataPart} holding structured JSON, and a \code{TextPart} holding prose. The result
-comes back as an \emph{artifact} containing both. Everything the system actually depends
-on travels in the \code{DataPart}. The prose is advisory, and the reason for that
-separation is explained in Section~\ref{sec:invariants}.
-
-\begin{lstlisting}[style=js,caption={A request from the coordinator to the reconstruction
-agent, abbreviated. The contigs travel as structured data, never as prose.}]
+\begin{verbatim}
 {"jsonrpc": "2.0", "id": "req-4f1c", "method": "message/send",
  "params": {"message": {
      "role": "user",
@@ -423,22 +201,57 @@ agent, abbreviated. The contigs travel as structured data, never as prose.}]
          "left":  "TATTATCTTTCCGTTTGGCACAATT...",
          "right": "ATTGGCATTAAACCAGACATTGAAG...",
          "organism": ""}}]}}}
-\end{lstlisting}
+\end{verbatim}
 
-\subsection{What the agents can do: MCP tools}
+The HTTP layer is implemented on the Python standard library
+(\texttt{http.server.ThreadingHTTPServer}) rather than on a web framework, which keeps the
+protocol modules importable without the agent SDK and therefore independently testable.
 
-Inside each agent runs a language model, and everything that model is able to do is
-declared as a Model Context Protocol tool. A tool is a name, a description written for
-the model, a parameter schema, and a function. The model reads the descriptions and
-decides which to call and when.
+\subsection{Agent Capabilities: MCP Tools}
 
-\begin{lstlisting}[style=py,caption={An MCP tool. The description is the model's only
-instruction manual, so it is written for a reader, not as documentation.}]
+Every action an agent can take is declared as an MCP tool consisting of a name, a
+description written for the language model, a parameter schema and a handler function. The
+model reads the descriptions and decides which tool to invoke and when. Where the
+single-agent pipeline exposed two tools to one planner, the multi-agent system distributes
+thirteen tools across three agents, each seeing only its own.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Agent} & \textbf{Tool} & \textbf{Function} \\
+\midrule
+Coordinator    & \texttt{prepare\_query}           & construct query, verify peers \\
+               & \texttt{delegate\_reconstruction} & delegate the task and wait \\
+               & \texttt{evaluate\_result}         & apply the acceptance gate \\
+               & \texttt{emit\_trace}              & produce the execution record \\
+\midrule
+Retrieval      & \texttt{retrieve\_context}        & open a ranked pool, serve first batch \\
+               & \texttt{extend\_context}          & serve next batch without re-embedding \\
+               & \texttt{describe\_rows}           & metadata for records already served \\
+\midrule
+Reconstruction & \texttt{measure\_budget}          & report free token positions \\
+               & \texttt{request\_candidates}      & request a batch from retrieval \\
+               & \texttt{extend\_candidates}       & request further candidates \\
+               & \texttt{admit\_candidates}        & tokenize and admit what fits \\
+               & \texttt{generate}                 & run the masked prediction \\
+               & \texttt{report\_state}            & read-only diagnostic \\
+\bottomrule
+\end{tabular}
+\caption{MCP tools exposed by each agent. Every tool is keyed by a task or request
+identifier; none accepts a nucleotide sequence as a parameter.}
+\label{tab:mcp-tools}
+\end{table}
+
+A representative tool definition is shown below. The description is the only documentation
+the language model receives, so it is written as an instruction rather than as a comment.
+
+\begin{lstlisting}[language=Python]
 @tool(
     "measure_budget",
-    "Tokenize the model input with the context slot empty and report how many of the "
-    "4096 token positions are free for retrieved context. Must be called before "
-    "requesting or admitting any candidates.",
+    "Tokenize the model input with the context slot empty and report how many "
+    "of the 4096 token positions are free for retrieved context. Must be called "
+    "before requesting or admitting any candidates.",
     {"task_id": str},
 )
 @guarded("measure_budget", requires=None)
@@ -448,314 +261,261 @@ async def measure_budget(args: dict, state: ReconTask) -> dict:
     free = config.MAX_LENGTH - base_tokens - seed - config.SAFETY_TOKENS
     state.free_tokens_remaining = max(0, free)
     state.advance(Phase.MEASURED)
-    return errors.tool_ok({"base_tokens": base_tokens, "free_tokens": free, ...})
+    return errors.tool_ok({"base_tokens": base_tokens, "free_tokens": free})
 \end{lstlisting}
 
-The complete set is thirteen tools across the three agents:
+\subsection{Specialized Agents and Their Surrogate Models}
 
-\begin{center}
+A defining property of the multi-agent design, and the principal difference from the
+single-agent pipeline, is that each agent hosts the specific models its role requires and no
+others. These are \textit{surrogate models}: trained networks that stand in for computations
+that are exact in principle but prohibitively expensive to perform directly. The language
+model inside each agent performs none of this scientific computation; it decides when the
+surrogates are invoked and with which parameters.
+
+\subsubsection{Retrieval Agent: \texttt{agents/retrieval.py}}
+
+This agent hosts two surrogate models.
+
+\begin{itemize}
+    \item \textbf{DNABERT-S, a surrogate for sequence alignment}: determining whether two
+    DNA sequences are related is solved exactly by pairwise alignment, which for a
+    1{,}800~bp query against 43{,}575 references requires tens of millions of character
+    comparisons. DNABERT-S instead maps any sequence to a fixed vector of 768 real values,
+    reducing the comparison to a dot product. The model was trained contrastively, so that
+    sequences from the same organism are drawn together in the embedding space and sequences
+    from different organisms are separated, which is precisely the property a similarity
+    search requires.
+
+    \item \textbf{FAISS HNSW, a surrogate for exhaustive search}: identifying the nearest
+    embedding exactly requires 43{,}575 comparisons. FAISS constructs a navigable
+    small-world graph and traverses it greedily, visiting only a small fraction of the
+    records. This is an approximate nearest-neighbour search, and its approximate nature is
+    visible in practice: restricting the search with a sparse identifier selector causes the
+    traversal to return no results at all, because the greedy walk cannot reach a sufficient
+    number of permitted nodes. The implementation therefore over-fetches and filters
+    afterwards.
+\end{itemize}
+
+The correctness of the retrieval surrogate was verified by querying the index with reference
+sequences it already contains and confirming that each is returned as its own nearest
+neighbour.
+
+\begin{table}[H]
+\centering
 \begin{tabular}{lll}
 \toprule
-Agent & Tool & What it does \\
+\textbf{Query record} & \textbf{Source organism} & \textbf{Three nearest neighbours} \\
 \midrule
-Coordinator & \code{prepare\_query} & cut the query, verify the peers \\
-            & \code{delegate\_reconstruction} & hand the task on and wait \\
-            & \code{evaluate\_result} & apply the acceptance check \\
-            & \code{emit\_trace} & produce the run record \\
-\midrule
-Retrieval   & \code{retrieve\_context} & open a ranked pool, serve the first batch \\
-            & \code{extend\_context} & serve the next batch, no new search \\
-            & \code{describe\_rows} & metadata for rows already served \\
-\midrule
-Reconstruction & \code{measure\_budget} & how many tokens are free \\
-            & \code{request\_candidates} & ask retrieval for a batch \\
-            & \code{extend\_candidates} & ask for more \\
-            & \code{admit\_candidates} & tokenise each, keep what fits \\
-            & \code{generate} & run the prediction \\
-            & \code{report\_state} & read only diagnostic \\
+23500 & \textit{Fusobacterium animalis} & itself \textbf{1.000}, \textit{F. polymorphum} 0.893, 0.887 \\
+27000 & \textit{F. polymorphum}         & itself \textbf{1.000}, \textit{F. animalis} 0.917, 0.866 \\
+12500 & \textit{Staphylococcus aureus}  & itself \textbf{1.000}, \textit{S. aureus} 0.826, 0.794 \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Self-retrieval verification of the embedding index. A cosine similarity of exactly
+1.000 confirms the embedder, the vector normalization, the distance conversion and the
+record indexing simultaneously.}
+\label{tab:self-retrieval}
+\end{table}
 
-% =====================================================================
-\section{The surrogate models inside the agents}
-\label{sec:surrogate}
+The agent exposes \texttt{retrieve\_context()}, which embeds the query once and ranks the
+corpus, and \texttt{extend\_context()}, which serves subsequent batches from the same ranking
+without repeating the embedding step. Both return only row identifiers and scores. Resolving
+an identifier to a nucleotide sequence is the responsibility of the consumer, which prevents
+corpus DNA from crossing an agent boundary as an opaque block. This is a direct contrast with
+the single-agent design, where \texttt{retrieve\_context()} returned concatenated sequences
+that the caller could only accept or lose in their entirety.
 
-\subsection{What a surrogate model is}
+\subsubsection{Reconstruction Agent: \texttt{agents/reconstruction.py}}
 
-A \emph{surrogate model} is a learned stand in for a computation that could in principle
-be done exactly, but that would be far too slow to do at the scale required. Instead of
-performing the exact calculation, a neural network is trained to approximate its answer,
-and the approximation is used in its place.
+This agent hosts the third surrogate, GENA-LM BigBird, the same masked language model used in
+the single-agent pipeline. It stands in for the true sequence of the gap, which could
+otherwise be obtained only by resequencing the organism, by producing the nucleotides that
+are most plausible given the surrounding context.
 
-This system contains three surrogates. Two of them live inside the retrieval agent and
-one inside the reconstruction agent. None of them is the language model that drives the
-agent, and that distinction is the point of this section: \textbf{the language model
-schedules the work, the surrogate models perform it}.
+Because this agent owns the tokenizer, it is the only component that can determine how much
+context fits, and it therefore implements the following operations:
 
-\subsection{The two surrogates in the retrieval agent}
+\begin{itemize}
+    \item \texttt{measure\_budget()}: tokenizes the input with the context slot empty and
+    subtracts from the 4{,}096 token limit.
+    \item \texttt{request\_candidates()} and \texttt{extend\_candidates()}: issue A2A requests
+    to the retrieval agent, sized according to the measured budget.
+    \item \texttt{admit\_candidates()}: resolves the returned identifiers against its own copy
+    of the corpus, tokenizes each candidate and admits those that fit.
+    \item \texttt{generate()}: performs the masked prediction over the admitted context.
+\end{itemize}
 
-\paragraph{DNABERT-S, a surrogate for sequence alignment.}
-The exact way to ask whether two DNA sequences are related is to align them, letter by
-letter, allowing for insertions and deletions. This is accurate and it is expensive:
-comparing one 1{,}800 letter query against 43{,}575 reference genes means tens of millions
-of letter comparisons for a single question.
+\subsubsection{Model Residency and Placement}
 
-DNABERT-S replaces that. It converts any DNA sequence into a fixed list of 768 numbers,
-an embedding, chosen so that related sequences receive similar lists. Asking whether two
-sequences are related then becomes a dot product of two short vectors instead of an
-alignment of two long strings. The model was trained \emph{contrastively}, which means it
-was shown pairs of sequences and taught to pull sequences from the same organism together
-and push sequences from different organisms apart. That is precisely the property a
-similarity search needs, and it is why this model was selected over fifteen others in the
-earlier benchmark.
+Each agent loads its surrogates once at startup and retains them for the lifetime of the
+deployment. This is not merely an optimization; it determines the operating characteristics
+of the system.
 
-\paragraph{FAISS HNSW, a surrogate for exhaustive search.}
-Even with embeddings, answering ``which of the 43{,}575 references is closest?'' exactly
-requires 43{,}575 comparisons. FAISS builds a navigable graph over the embeddings and
-walks it greedily, visiting only a small fraction of the records. This is an
-\emph{approximate} nearest neighbour search: it usually finds the closest records, and it
-is not guaranteed to.
-
-The approximation is visible in the implementation. When the search is restricted to a
-single organism, handing the graph a scattered list of permitted records causes the walk
-to fail entirely and return nothing at all, because the traversal cannot reach enough
-permitted nodes from its entry point. The system therefore searches broadly and filters
-afterwards, which is slower but reliable. This is the ordinary cost of using a surrogate:
-it must be used within the conditions where its approximation holds.
-
-\subsection{The surrogate in the reconstruction agent}
-
-GENA-LM plays the same role for generation. The exact answer to ``what letters are in this
-gap?'' can only be obtained by sequencing the organism again. GENA-LM is a stand in: a
-network trained on large quantities of real DNA which, given the surrounding sequence,
-produces the letters that would most plausibly appear there. It approximates that
-sequence rather than recovering it, which is why the acceptance check in
-Section~\ref{sec:gate} tests the delivery of evidence and the shape of the output rather
-than biological correctness.
-
-\subsection{Why each surrogate lives inside a specific agent}
-
-Each surrogate is loaded once, when its agent starts, and stays resident in that process
-for the lifetime of the deployment. This is not an optimisation detail; it determines
-what the architecture can do.
-
-\begin{center}
-\begin{tabular}{llrr}
+\begin{table}[H]
+\centering
+\begin{tabular}{lrrr}
 \toprule
-Agent & Surrogate held & Load cost & Resident memory \\
+\textbf{Agent} & \textbf{Startup} & \textbf{Resident memory} & \textbf{Node resources} \\
 \midrule
-Retrieval & DNABERT-S embedder & 33.9 s & \multirow{2}{*}{1.0 GB} \\
-          & FAISS graph over 43{,}575 genes & 5.5 s & \\
-Reconstruction & GENA-LM generator & 2.3 s & 1.2 GB \\
-Coordinator & none & 0 s & 0.12 GB \\
+Coordinator    &  2\,s & 0.12\,GB & 40 cores, 47\,GB \\
+Retrieval      & 33\,s & 1.0\,GB  & 40 cores, 47\,GB \\
+Reconstruction &  3\,s & 1.2\,GB  & 40 cores, 47\,GB \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Startup cost and resident footprint of each agent. Deployed one per node, each
+receives the full resources of an ARES compute node.}
+\label{tab:residency}
+\end{table}
 
-The consequence is measurable. A search that must load DNABERT-S first takes 33.9 seconds.
-The same search against an already loaded model takes 0.41 seconds, which is \textbf{83
-times faster}. In the previous pipeline the generator was reloaded on every invocation of
-the processing function, and the substring retriever re read all 51 megabytes of the
-reference library from disk on every single call, taking about one second each time. Under
-the new arrangement the per request loading cost is zero, because nothing is loaded per
-request.
+The effect is measurable. A similarity search that must first load DNABERT-S requires
+33.9~seconds; the identical search against the resident model requires 0.41~seconds, an
+improvement of a factor of \textbf{83}. In the single-agent pipeline the generator was
+reloaded on each invocation of the processing function, and the substring retriever re-read
+the entire 51~MB corpus from disk on every call.
 
-Placement follows from these numbers as well. The retrieval agent needs a full gigabyte and
-half a minute of startup; the coordinator needs neither. Giving each its own node means the
-coordinator is ready in two seconds and can begin checking on its peers while they are
-still loading, and the two memory hungry agents never compete for the same machine's memory
-bandwidth.
+\subsection{Enforcing Correctness: \texttt{runtime/state.py}}
 
-\subsection{Checking that a surrogate is behaving}
+Placing a language model in control of the workflow reintroduces the first limitation
+identified in Section~\ref{subsec:mas-motivation}. Three rules prevent this, none of which is
+expressed as a written instruction.
 
-Because a surrogate only approximates, it can be subtly wrong in ways that produce
-plausible output. The retrieval surrogate was therefore verified directly, by searching
-the index with a reference sequence that is already inside it and checking that the search
-returns that same record:
+\begin{itemize}
+    \item \textbf{Results are read from state, not from generated text}: each tool writes into
+    a per-task record, and the A2A response is serialized from that record by ordinary code.
+    The prose produced by the model is attached to the artifact and consumed by nothing. This
+    proved necessary in practice: during development one retrieval invocation terminated with
+    an error message instead of a summary \textit{after} its tool had already executed, and the
+    task nevertheless completed correctly with the expected record identifiers.
 
-\begin{center}
-\begin{tabular}{lll}
-\toprule
-Query & Its organism & Top three results \\
-\midrule
-record 23500 & \emph{Fusobacterium animalis} & itself \textbf{1.000}, \emph{F. polymorphum} 0.893, 0.887 \\
-record 27000 & \emph{F. polymorphum} & itself \textbf{1.000}, \emph{F. animalis} 0.917, 0.866 \\
-record 12500 & \emph{Staphylococcus aureus} & itself \textbf{1.000}, \emph{S. aureus} 0.826, 0.794 \\
-\bottomrule
-\end{tabular}
-\end{center}
+    \item \textbf{Ordering is a data dependency}: every tool begins with a precondition check
+    and performs no work if the prerequisites are absent. The refusal is a structured value
+    naming the tool that must be called instead.
 
-A similarity of exactly 1.000 for an identical sequence confirms the whole chain: the
-embedder runs, the vectors are normalised the same way they were when the index was built,
-the distance is converted back to a similarity correctly, and record number $k$ in the
-index really is record number $k$ in the library. Neighbouring records from a related
-species scoring 0.89 to 0.92 confirms that the contrastive training is doing its job.
+    \item \textbf{Sequences are never tool arguments}: every tool is keyed by a task
+    identifier, and the contigs, the query and the retrieved sequences reside in agent state.
+    The model determines \textit{when} a search occurs, not \textit{what} is searched for.
+\end{itemize}
 
-\subsection{The language model is not a surrogate}
+A representative refusal is shown below.
 
-It is worth being explicit, because the two are easily confused. Each agent also contains
-a general purpose language model, and its role is entirely different. It never embeds a
-sequence, never searches the index and never predicts a nucleotide. It reads the
-descriptions of the tools available to it and decides which to call and with what batch
-size. Every scientific quantity in the final result was computed by a surrogate model or
-by ordinary arithmetic, and none of it was produced by the language model. That separation
-is enforced by the rules in Section~\ref{sec:invariants}.
-
-% =====================================================================
-\section{The three rules that make it trustworthy}
-\label{sec:invariants}
-
-Putting a language model in charge of the sequence of operations reintroduces exactly the
-weakness described in Section~\ref{sec:old}: a model may skip a step or invent a value.
-Three rules prevent that, and none of them is a written instruction.
-
-\subsection{Rule 1: the answer is read from memory, never from the model's words}
-
-Each tool writes its results into a per task record held in the agent's memory. When the
-model's turn ends, the reply is assembled by ordinary code from that record. The model's
-prose is attached to the artifact and read by nothing.
-
-This is not a theoretical safeguard. During development one retrieval run ended with the
-model producing an error message instead of a summary, \emph{after} its tool had already
-executed. The task still completed correctly with the right row numbers, because the
-answer never depended on what the model said.
-
-\subsection{Rule 2: ordering is a data dependency, not an instruction}
-
-Every tool begins with a check of the task's state, and refuses to do any work if the
-prerequisites are missing. The refusal is a structured value that names the exact tool
-to call instead.
-
-\begin{lstlisting}[style=js,caption={What the model receives if it tries to admit
-reference sequences before measuring the budget. The remedy field is generated at the
-moment of the violation by code that knows the true state.}]
+\begin{verbatim}
 {"error": "PRECONDITION_FAILED",
  "code": "BUDGET_NOT_MEASURED",
  "phase": "CREATED",
  "required_phase": "MEASURED",
- "remedy": "Call mcp__reconstruction_agent__measure_budget with this task_id first; "
-           "it reports how many tokens are free for retrieved context."}
-\end{lstlisting}
+ "remedy": "Call mcp__reconstruction_agent__measure_budget with this
+            task_id first; it reports how many tokens are free for
+            retrieved context."}
+\end{verbatim}
 
-The most important of these checks concerns the budget itself. To admit reference
-sequences, the model must pass the number of free tokens, and that number is rejected
-unless it equals the value the agent currently holds. Since the only way to learn that
-value is to have called \code{measure\_budget}, the dependency cannot be bypassed. A
-second check refuses any gap length other than the one the task was created with, which is
-the precise defect that existed in the old code, where an adjusted length silently
-replaced the requested one.
+The most significant of these checks concerns the budget. To admit candidates, the model must
+supply the number of free tokens, and any value other than the one the agent currently holds
+is rejected. Since that value can be obtained only by calling \texttt{measure\_budget()}, the
+dependency cannot be circumvented. A second check rejects any gap length other than the one
+with which the task was created, which is the precise defect present in
+\texttt{planner\_tools.py}, where an adjusted length silently replaced the requested one.
 
-\begin{center}
+\begin{table}[H]
+\centering
 \begin{tabular}{ll}
 \toprule
-Refusal code & Raised when \\
+\textbf{Refusal code} & \textbf{Condition} \\
 \midrule
-\code{BUDGET\_NOT\_MEASURED} & admitting before measuring \\
-\code{BUDGET\_MISMATCH} & the free token count is not the agent's current value \\
-\code{GAP\_LENGTH\_MUTATED} & a target length other than the one requested \\
-\code{NOTHING\_ADMITTED} & predicting with no evidence admitted \\
-\code{NO\_POOL} & extending a candidate pool that was never opened \\
-\code{CALL\_BUDGET\_EXHAUSTED} & a looping model; the task is stopped \\
+\texttt{BUDGET\_NOT\_MEASURED}   & admission attempted before measurement \\
+\texttt{BUDGET\_MISMATCH}        & free token count differs from the agent's value \\
+\texttt{GAP\_LENGTH\_MUTATED}    & a target length other than the one requested \\
+\texttt{NOTHING\_ADMITTED}       & generation attempted with no admitted context \\
+\texttt{NO\_POOL}                & extension of a pool that was never opened \\
+\texttt{CALL\_BUDGET\_EXHAUSTED} & repeated invocation; the task is terminated \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Precondition failures enforced by the tool handlers.}
+\label{tab:preconditions}
+\end{table}
 
-\subsection{Rule 3: DNA is never a tool argument and never enters a prompt}
+\subsection{The Negotiation Loop}
+\label{subsec:mas-negotiation}
 
-Every tool is identified by a task number. The contigs, the query and the retrieved
-sequences all live in the agent's memory. The model chooses \emph{when} to search, not
-\emph{what} to search for, so it cannot paraphrase or truncate the data.
-
-This also had a practical effect. In an early version the 1{,}800 letter query was written
-into the prompt. It caused the language model to refuse the request, and each retrieval
-call took 46 seconds. After moving the query into memory, refusals stopped and the same
-call took 13 seconds.
-
-% =====================================================================
-\section{The negotiation}
-\label{sec:negotiation}
-
-This is the part that gives the system its name. It happens between two machines.
+The interaction between the reconstruction and retrieval agents is the defining feature of
+the multi-agent design and has no counterpart in the single-agent pipeline. Neither agent can
+determine alone how many reference sequences to use: the retrieval agent knows the ranking but
+not the tokenizer state, and the reconstruction agent knows the budget but has no access to
+the corpus.
 
 \begin{enumerate}
-\item The reconstruction agent tokenises the input with the evidence slot empty and finds
-      that \textbf{3{,}236 of 4{,}096 tokens are free}.
-\item It asks the retrieval agent for candidates, choosing a batch size appropriate to
-      that budget. Retrieval embeds the query once, ranks the whole library, and returns
-      the first ten row numbers with their similarity scores.
-\item Reconstruction looks up those ten genes in its own copy of the library, tokenises
-      each one, and keeps those that fit. It reports how much room is left.
-\item Room remains, so it asks for more. Retrieval serves the next slice of the
-      \emph{same} ranking, with no new search.
-\item The loop ends when the input window is full or the ranking is exhausted, and the
-      prediction runs.
+    \item The reconstruction agent tokenizes the input with the context slot empty and
+    determines that \textbf{3{,}236 of 4{,}096 token positions are free}.
+    \item It requests candidates from the retrieval agent with a batch size appropriate to
+    that budget. The retrieval agent embeds the query once, ranks the corpus and returns the
+    first ten row identifiers with their similarity scores.
+    \item The reconstruction agent resolves those identifiers locally, tokenizes each
+    candidate, admits those that fit and reports the remaining capacity.
+    \item Capacity remains, so it requests a further batch. The retrieval agent serves the next
+    segment of the same ranking without repeating the embedding step.
+    \item The loop terminates when the context window is full or the ranking is exhausted, and
+    the prediction is performed.
 \end{enumerate}
 
-\begin{lstlisting}[style=sh,caption={The negotiation as recorded during a real three node
-run. The batch sizes shrink as the remaining budget shrinks. Nothing instructed the model
-to choose these numbers; it read them from the previous reply.}]
- 1. measure_budget       ok  phase=MEASURED    +7.9s     3236 tokens free
- 2. request_candidates   ok  phase=MEASURED   +24.6s     served 10 of a 40 row pool
+The following trace was recorded during a three-node execution. The batch sizes decrease as
+the remaining budget decreases; no instruction specified these values, and the model derived
+them from the preceding response.
+
+\begin{verbatim}
+ 1. measure_budget       ok  phase=MEASURED    +7.9s   3236 tokens free
+ 2. request_candidates   ok  phase=MEASURED   +24.6s   served 10 of a 40 row pool
  3. admit_candidates     ok  phase=ADMITTING  +31.3s
- 4. extend_candidates    ok  phase=ADMITTING  +47.6s     served 5   (total 15)
+ 4. extend_candidates    ok  phase=ADMITTING  +47.6s   served  5  (total 15)
  5. admit_candidates     ok  phase=ADMITTING  +51.2s
- 6. extend_candidates    ok  phase=ADMITTING  +66.0s     served 2   (total 17)
+ 6. extend_candidates    ok  phase=ADMITTING  +66.0s   served  2  (total 17)
  7. admit_candidates     ok  phase=ADMITTING  +70.0s
- 8. generate             ok  phase=GENERATED +184.7s     872 letters produced
-\end{lstlisting}
+ 8. generate             ok  phase=GENERATED +184.7s   872 nucleotides produced
+\end{verbatim}
 
-The outcome is that \textbf{2{,}942 of the 3{,}236 available tokens were filled with
-retrieved evidence}, which is 91 percent of the budget. Under the old fixed choice of two
-sequences, roughly 350 tokens would have been used, about 11 percent, and no number would
-have been reported either way.
+The outcome is that \textbf{2{,}942 of the 3{,}236 available token positions were occupied by
+retrieved context}, corresponding to 91\% of the budget. Under the fixed \texttt{k=2} of the
+single-agent pipeline, approximately 350 tokens would have been used, or 11\%, and no
+measurement of either figure would have been produced.
 
-\subsection{Why the evidence now survives}
+\subsubsection{Prompt Assembly: \texttt{tools/mlm.py}}
 
-Two changes, both small, both necessary.
+Two modifications ensure that the admitted context survives tokenization. First, the context
+is placed at the beginning of the input rather than appended, so that truncation, which
+removes from the end, cannot reach it.
 
-\begin{lstlisting}[style=py,caption={The evidence is placed at the front. Truncation
-removes from the end, so whatever is at the front survives.}]
+\begin{lstlisting}[language=Python]
 def build_model_input(context: str, left: str, right: str) -> str:
-    """Context first, then the flanks around the mask slot."""
+    """Context first, then the flanks surrounding the mask slot."""
     head = f"{context.strip()} " if context.strip() else ""
     return f"{head}{left} [MASKS] {right}"
 \end{lstlisting}
 
-The second is that the contigs are trimmed to 2{,}000 letters on each side before the
-input is built. Measured on gap number one:
+Second, the flanking contigs are truncated to 2{,}000~bp on each side before assembly. The
+effect on the available budget for gap~1 of AP012051.1 is shown below.
 
-\begin{center}
+\begin{table}[H]
+\centering
 \begin{tabular}{lrr}
 \toprule
-Setting & Base input & Free for evidence \\
+\textbf{Configuration} & \textbf{Base input} & \textbf{Free for context} \\
 \midrule
-No trimming & 3{,}305 tokens & about 583 \\
-\textbf{2{,}000 letters each side (default)} & \textbf{682 tokens} & \textbf{3{,}236} \\
-The old test's contig pair, untrimmed & 58{,}776 tokens & none at all \\
+No truncation                              &  3{,}305 tokens & 583 \\
+2{,}000\,bp per flank (default)            &     682 tokens & 3{,}236 \\
+Contig pair used by the original harness   & 58{,}776 tokens & none \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Token accounting under three flank configurations. The final row corresponds to
+\texttt{contig31} and \texttt{contig22} as selected by the single-agent test harness, whose
+combined length exceeds the context window by a factor of more than fourteen.}
+\label{tab:budget}
+\end{table}
 
-The last row is the original defect, measured rather than argued about. With the two
-longest contigs the input is more than fourteen times the size of the window, so no
-evidence could possibly have survived, yet those runs were labelled retrieval augmented.
+\subsection{Acceptance Gate: \texttt{gate.py}}
 
-% =====================================================================
-\section{The acceptance check}
-\label{sec:gate}
+The single-agent pipeline applied no acceptance criterion; whatever the model produced was
+returned. The coordinator now evaluates three conditions before releasing a result.
 
-The previous pipeline had no acceptance check of any kind. Whatever the model produced was
-returned. The coordinator now applies three tests before anything leaves the system:
-
-\begin{enumerate}
-\item the produced length is within five percent of the requested gap length,
-\item every character is one of A, C, G, T or N,
-\item \textbf{the number of evidence tokens that reached the model is greater than zero.}
-\end{enumerate}
-
-\begin{lstlisting}[style=py,caption={The acceptance check. A pure function with no
-dependencies, so it can be reasoned about on its own.}]
+\begin{lstlisting}[language=Python]
 def evaluate(produced: str, gap_length: int, context_tokens_admitted: int,
              tolerance: float = 0.05) -> tuple[bool, list[str]]:
     reasons = []
@@ -771,44 +531,41 @@ def evaluate(produced: str, gap_length: int, context_tokens_admitted: int,
     return (not reasons), reasons
 \end{lstlisting}
 
-The third test is the one that did not exist before, and it is the reason the system was
-built. It converts ``this run used retrieval'' from a label into a measured precondition.
+The third condition, that the number of admitted context tokens must be greater than zero, did
+not exist previously and is the principal contribution of the redesign. It converts the claim
+that an execution used retrieval from a label into a verified precondition. The resulting
+verdicts are deliberately distinguishable: \texttt{REJECTED:NO\_CONTEXT} indicates a defect in
+the orchestration, whereas \texttt{REJECTED:LENGTH} indicates that the surrogate generator
+produced an implausible output.
 
-The verdicts are deliberately distinguishable, because they call for different responses.
-A verdict of \code{REJECTED:NO\_CONTEXT} means the plumbing is broken and is this system's
-responsibility. A verdict of \code{REJECTED:LENGTH} means the prediction model produced
-something poor, which is a separate and known limitation.
+\subsection{Deployment on ARES: \texttt{deploy.sh}}
 
-% =====================================================================
-\section{Deployment on ARES}
-\label{sec:deploy}
+The three agents are deployed one per compute node. Node allocation is handled by SLURM, and
+the shared filesystem makes the code, the reference corpus and the credentials visible from
+every node without staging.
 
-The three agents run one per compute node. ARES allocates nodes through SLURM, and the
-shared filesystem means the code, the reference library and the credentials are visible
-from every node without copying anything.
-
-\begin{lstlisting}[style=sh,caption={Complete deployment and test, start to finish.}]
-# 1. reserve three compute nodes (or use ./deploy.sh --alloc to do this automatically)
+\begin{verbatim}
+# 1. reserve three compute nodes
 salloc -N 3 -p compute -t 02:00:00 --no-shell -J genomio-mas
 #    -> Granted job allocation 22917, nodes ares-comp-[10-12]
 
-# 2. start the fleet: preflight every node, launch one agent each, wait until ready
+# 2. preflight each node, launch one agent per node, wait for readiness
 ./multiagent_system/deploy.sh 22917
 
-# 3. run the test
+# 3. execute the test
 multiagent_system/.venv/bin/python3 multiagent_system/test.py --mode slurm
 
-# 4. release the nodes
+# 4. release the allocation
 scancel 22917
-\end{lstlisting}
+\end{verbatim}
 
-The deployment script never hard codes a node name. It reads the allocation, assigns one
-role per node, computes each agent's address, and writes them to a file the test reads.
-Before spending anything it checks on every node that the Python environment imports, that
-the credentials are present and that the reference index is visible, and it aborts if any
-check fails.
+The deployment script never hard-codes node names; it queries the allocation, assigns one role
+per node, computes each agent's endpoint and records them for the test to read. Before any
+agent is started it verifies on every node that the Python environment imports correctly, that
+the credentials are present and that the reference index is accessible, aborting the launch if
+any check fails.
 
-\begin{lstlisting}[style=sh,caption={Startup, as reported by the deployment script.}]
+\begin{verbatim}
 [deploy] job 22917 holds 3 node(s): ares-comp-10 ares-comp-11 ares-comp-12
 [deploy] placement: one-per-node
 [deploy] preflight ares-comp-10: OK
@@ -818,51 +575,140 @@ check fails.
   retrieval       http://ares-comp-11:8100
   reconstruction  http://ares-comp-12:8100
 [deploy] all three agents ready after 51s
-\end{lstlisting}
+\end{verbatim}
 
-Each agent reports \code{models\_loaded} on a health endpoint only once its models are
-loaded, so the test cannot send work into a thirty second model load and mistake it for a
-hang.
+Each agent reports \texttt{models\_loaded} on its health endpoint only once its surrogates have
+finished loading, so a client cannot dispatch work into a thirty-second model load and
+misinterpret it as an unresponsive service.
 
-% =====================================================================
-\section{Results: the same test, a different outcome}
-\label{sec:results}
+\subsection{Pipeline Execution Flow}
 
-\subsection{What is being compared}
+Once a gap specification is submitted to the coordinator, the following steps occur.
 
-The task is identical: fill gap number one of AP012051.1, 870 letters, using the
-surrounding contigs and the reference library. The test script is the direct successor of
-the original, with two differences that were forced by defects in the original.
+\begin{enumerate}
+    \item The coordinator constructs the retrieval query from 900~bp on each side of the gap,
+    confirms that both peers are operational and compares the corpus fingerprints they publish.
+    \item It delegates the task to the reconstruction agent over A2A, transmitting the contigs
+    and the gap length as structured data.
+    \item The reconstruction agent measures the available token budget.
+    \item It negotiates candidate batches with the retrieval agent, admitting those that fit,
+    until the window is full or the ranking is exhausted.
+    \item It performs the masked prediction and returns the sequence together with the counters
+    describing how it was produced.
+    \item The coordinator applies the acceptance gate and emits the execution record.
+\end{enumerate}
 
-First, the original script could not run at all: it read the data from a path that does
-not exist, and the retrieval module opened a directory that does not exist. Second, it
-selected the wrong two contigs. The new script selects the flanking contigs by matching
-their genome coordinates to the gap boundaries, which for gap number one yields contig 1
-and contig 2, and it verifies this for all 32 interior gaps of the genome.
+\subsection{Improvements over the Single-Agent Pipeline}
+\label{subsec:mas-improvements}
 
-The original script also asserted nothing; it printed. The new one makes twelve assertions
-and returns a non zero exit code on failure.
+The improvements derive from two independent properties of the multi-agent design: that there
+are specialized agents, and that each agent owns the specific models its role requires.
 
-\subsection{The outcome}
+\subsubsection{Improvements arising from specialized agents}
 
-\begin{center}
-\begin{tabular}{lll}
+\begin{itemize}
+    \item \textbf{A previously non-existent quantity is now measured}: because the component
+    holding the tokenizer and the component ranking the references are separate processes, the
+    token budget must be transmitted between them, and consequently it is computed, sent and
+    recorded. The multi-agent structure did not improve this calculation; it caused the
+    calculation to exist.
+
+    \item \textbf{Fixed constants are replaced by negotiation}: candidates are served
+    incrementally in response to the measured budget rather than as a fixed \texttt{k=2},
+    raising context window utilization from approximately 11\% to 91\%.
+
+    \item \textbf{Rules are enforced at an interface}: preconditions apply to a remote peer
+    exactly as to a local caller. An out-of-order request is refused before any search is
+    performed, and in one recorded instance the refusal occurred before the peer was contacted
+    at all. Within a single process, an ordering rule is a convention that subsequent
+    modification may silently violate; across an interface it forms part of the contract.
+
+    \item \textbf{Failures remain localized}: an error in one agent's language model does not
+    terminate the execution, as the remaining agents are separate processes with independent
+    state. In the single-agent pipeline, a failure in the one language model driving all steps
+    ends the run.
+
+    \item \textbf{Inconsistencies between components become detectable}: because the two peers
+    load the reference corpus independently, they could hold different versions of it, in which
+    case a row identifier would denote a different gene to each. Each agent therefore publishes
+    a corpus fingerprint and the coordinator compares them before delegating. This verification
+    is meaningless within a single process, where only one copy exists. Separation created the
+    risk and simultaneously made it checkable.
+
+    \item \textbf{Executions are auditable across machines}: every task carries a shared context
+    identifier, so records produced on three different nodes join on a single key. The
+    negotiation trace in Section~\ref{subsec:mas-negotiation} was reconstructed from these
+    records rather than from console output.
+
+    \item \textbf{Components are independently testable}: the system includes 154 unit and
+    contract tests that execute in approximately three seconds without loading any scientific
+    model or invoking any language model, because each tool can be called directly and each
+    precondition verified in isolation.
+\end{itemize}
+
+\subsubsection{Improvements arising from agent-specific models}
+
+\begin{itemize}
+    \item \textbf{Surrogate models remain resident}: loading occurs once per agent rather than
+    once per request, yielding similarity searches 83 times faster than those requiring a cold
+    model load.
+
+    \item \textbf{Each model is co-located with the data it requires}: the embedder resides with
+    the index constructed from it, so their correspondence is an internal invariant rather than
+    a runtime contract; the generator resides with the tokenizer that measures its budget, which
+    is what renders that budget measurable at all.
+
+    \item \textbf{Resources are allocated according to demand}: three components with footprints
+    of 0.12, 1.0 and 1.2~GB and startup costs of 2, 33 and 3~seconds each receive a dedicated
+    40-core node rather than competing for one.
+
+    \item \textbf{Startup is amortized}: the fleet becomes ready in 51~seconds and remains
+    available, so subsequent executions against the same deployment report readiness
+    immediately.
+
+    \item \textbf{Components are independently replaceable}: because each agent is reached only
+    through a documented protocol endpoint and advertises its capabilities through an agent
+    card, it can be restarted, relocated or reimplemented without modifying its peers.
+\end{itemize}
+
+\subsubsection{Summary comparison}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{3.7cm}p{4.4cm}p{5.0cm}}
 \toprule
-& \textbf{Previous pipeline} & \textbf{Three node system} \\
+& \textbf{Single-agent pipeline} & \textbf{Multi-agent system} \\
 \midrule
-Runs at all & no & yes \\
-Contigs used & 31 and 22 (not adjacent) & 1 and 2 (the true neighbours) \\
-References found & 0 of 37{,}645 & 17 admitted, ranked by similarity \\
-Evidence reaching the model & not measured, effectively 0 & \textbf{2{,}942 tokens} \\
-Model input & over the limit, truncated & 3{,}850 of 4{,}096, not truncated \\
-Ordering & requested in prose & enforced by preconditions \\
-Acceptance check & none & 3 checks, verdict recorded \\
-Verification & printed output & 12 assertions, exit code \\
+Architecture           & one planner, two tools, one process & three agents, thirteen tools, three nodes \\
+Token budget           & never computed                & measured and transmitted: 3{,}236 \\
+Reference selection    & fixed constant $k=2$          & negotiated against the budget \\
+Window utilization     & approximately 11\%            & 91\%, i.e. 2{,}942 tokens \\
+Context reaching model & silently truncated            & 2{,}942 tokens, verified per execution \\
+Tool ordering          & requested in the prompt       & precondition on every tool \\
+Genomic payload        & passes through the prompt     & structured data, never in a prompt \\
+Model loading          & per invocation                & once per agent, 83$\times$ faster \\
+Memory                 & 2.4\,GB in one process        & 0.12 / 1.0 / 1.2\,GB across nodes \\
+Available cores        & 40, shared by all roles       & 120, forty per role \\
+Failure isolation      & terminates the execution      & confined to one agent \\
+Corpus consistency     & not verifiable                & fingerprints compared \\
+Audit trail            & console output                & records joined across nodes \\
+Automated verification & printed output only           & 12 assertions, 154 unit tests \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Comparison of the single-agent pipeline and the multi-agent system.}
+\label{tab:comparison}
+\end{table}
 
-\begin{lstlisting}[style=sh,caption={The twelve assertions on a three node run.}]
+\subsection{Experimental Validation}
+
+The same task used to exercise the single-agent pipeline, gap~1 of accession AP012051.1
+(870~bp, situated between \texttt{contig1} and \texttt{contig2}), was executed against the
+three-node deployment. The successor test harness selects the flanking contigs by matching
+their genomic coordinates to the gap boundaries, a procedure verified against all 32 interior
+gaps of the genome, and it evaluates twelve assertions rather than printing diagnostic output.
+
+\begin{verbatim}
   1. coordinator task completed                     state=completed
   2. acceptance gate verdict is ACCEPTED            verdict=ACCEPTED
   3. context tokens admitted > 0                    2942 tokens reached the model
@@ -875,289 +721,65 @@ Verification & printed output & 12 assertions, exit code \\
  10. retrieval mode is correct                      unrestricted
  11. every tool call was one of the agent's own     15 calls, all mcp__
  12. retrieval pool was reused, not rebuilt         3 rounds, 17 rows, one pool of 40
-\end{lstlisting}
+\end{verbatim}
 
-Assertion 3 is the one the whole system exists to make possible. The previous pipeline
-could not have passed it.
+Assertion~3 is the condition the redesign was undertaken to make verifiable, and the
+single-agent pipeline could not have satisfied it. Assertion~7 confirms that the assembled
+input remained within the context window, so no admitted content was removed. Assertion~8
+confirms that the target length traversed all three machines unaltered.
 
-\subsection{Cost}
-
-\begin{center}
+\begin{table}[H]
+\centering
 \begin{tabular}{lr}
 \toprule
-Fleet startup (three nodes in parallel) & 51 s \\
-One gap, end to end & 167 s to 220 s \\
-Memory: coordinator / retrieval / reconstruction & 0.12 / 1.0 / 1.2 GB \\
-Language model turns per run & about 14 across three agents \\
+Fleet startup (three nodes, concurrent) & 51\,s \\
+End-to-end execution for one gap        & 167 to 220\,s \\
+Language model turns per execution      & approximately 14 across three agents \\
+Unit and contract tests                 & 154, in 3\,s \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Operating characteristics of the three-node deployment.}
+\label{tab:cost}
+\end{table}
 
-% =====================================================================
-\section{The improvements the multi-agent system brings}
-\label{sec:mas}
+\subsection{Outcome and Limitations}
 
-The gains come from two design choices, and it is worth separating them because they are
-independent. The first is that there are \textbf{specific agents}, each responsible for one
-part of the problem. The second is that each of those agents \textbf{owns the specific
-model its role requires}, and no other.
+The multi-agent redesign achieved its objective. The quantity of retrieved evidence delivered
+to the masked language model, which was neither computed nor reported in the single-agent
+pipeline and which the truncation defect reduced to zero on any sufficiently long contig pair,
+is now measured on every execution, transmitted between agents, verified by an acceptance gate
+and recorded in the execution trace. Tool ordering is enforced by preconditions rather than
+requested in a prompt, and no genomic sequence is handled by a language model at any point.
 
-\subsection{Improvements that come from having specific agents}
+Several limitations remain and delimit the scope of these results.
 
-\paragraph{1. A quantity that did not exist now exists.}
-This is the most important one and it is structural rather than incremental.
+\begin{itemize}
+    \item \textbf{The acceptance gate verifies delivery, not biological correctness}: it
+    confirms that retrieved evidence reached the model, that the produced length is plausible
+    and that the output is a valid nucleotide string. It makes no assessment of whether the
+    reconstruction is biologically accurate, and no such measurement is reported here, since
+    the single-agent pipeline computed none for this test case and no baseline for comparison
+    therefore exists.
 
-In the previous pipeline the component that knew how much room the prediction model had
-and the component that chose the reference sequences were the same function. Two
-consequences followed, neither noticed for a long time. The number of references retrieved
-was the constant \code{k = 2}, never compared against the available space. And the
-assembled input was tokenised with truncation enabled, so whatever did not fit was removed
-in silence.
+    \item \textbf{The generator itself is unchanged}: the masked prediction procedure was
+    retained deliberately, so that any change in behaviour is attributable to the four
+    modifications made around it, namely the position of the context, the counters returned,
+    the sampling threshold becoming a parameter, and the initial mask count being measured
+    rather than assumed.
 
-Both are the same failure: a constraint linking two responsibilities was never written
-down, because there was no boundary across which to write it. A value that never leaves a
-function is never checked, never logged and never appears in a result file.
+    \item \textbf{No throughput benefit for a single gap}: one gap requires approximately
+    212~seconds, the majority of which is the prediction itself, which executes on a single node
+    and cannot be subdivided. Concurrent processing of multiple gaps would pipeline naturally,
+    as retrieval can serve one request while reconstruction processes another, but this was not
+    evaluated.
 
-Once the two responsibilities are separate agents, the assumption cannot stay implicit.
-The reconstruction agent cannot guess how many references it will receive, because it has
-to ask. The retrieval agent cannot guess how many will fit, because it does not hold the
-tokeniser. The number 3{,}236 has to be measured, placed in a message and answered, and on
-the way it is necessarily recorded.
+    \item \textbf{Single task per agent}: a process-global model lock restricts each agent to
+    one task at a time. Concurrent execution would require either per-task model instances or a
+    request queue.
+\end{itemize}
 
-\begin{quote}
-The multi-agent structure did not make the budget calculation better. It made the budget
-calculation \emph{exist}.
-\end{quote}
-
-\paragraph{2. Fixed constants are replaced by negotiation.}
-Because the budget crosses the boundary, the batch size can respond to it. Retrieval serves
-candidates incrementally instead of returning a fixed two, and the reconstruction agent
-asks for more while room remains. In the recorded run this filled 2{,}942 of the 3{,}236
-available tokens, which is 91 percent of the budget, against roughly 11 percent under the
-old constant.
-
-\paragraph{3. Rules are enforced at an interface, not by convention.}
-The preconditions of Section~\ref{sec:invariants} apply to a peer exactly as they apply to
-a local caller. An out of order request is refused before any search runs, and in one
-recorded case the refusal happened before the peer was contacted at all. Inside a single
-process an ordering rule is a convention that the next person editing the file may not
-notice; across an interface it is part of the contract.
-
-\paragraph{4. A failure stays where it happened.}
-During development the retrieval agent's language model returned an error message instead
-of a summary, after its tool had already run. The task completed correctly with the right
-record numbers, and the other two agents were untouched. In a single process, a failure in
-the one language model driving all three steps ends the run.
-
-\paragraph{5. Disagreements between components become detectable.}
-Retrieval and reconstruction each read the reference library independently, so they could
-in principle hold different versions of it. A record number would then mean a different
-gene to each, and every result would be wrong with no error raised anywhere. Each agent
-therefore publishes a fingerprint of the library it loaded, and the coordinator compares
-them before delegating. Inside one process this question cannot even be posed, because
-there is only one copy. Separation created the risk and also made it checkable.
-
-\paragraph{6. A run is auditable across machines.}
-Every task carries a shared context identifier, so the coordinator's record on one node,
-the reconstruction record on a second and the retrieval records on a third all join on one
-key afterwards. The negotiation shown in Section~\ref{sec:negotiation} was reconstructed
-from those records, not from console output.
-
-\paragraph{7. Each component can be tested on its own.}
-Clear interfaces make each agent independently exercisable. The system carries 154 tests
-that run in about three seconds with no language model and no scientific models loaded,
-because each tool can be called directly and each precondition checked in isolation.
-
-\subsection{Improvements that come from each agent owning specific models}
-
-\paragraph{8. The models stay loaded.}
-Each agent loads its surrogate models once at startup and keeps them for the lifetime of
-the deployment. A similarity search that must load DNABERT-S first takes 33.9 seconds; the
-same search against the resident model takes 0.41 seconds, which is \textbf{83 times
-faster}. The previous pipeline reloaded the generator on each invocation of its processing
-function, and the substring retriever re read all 51 megabytes of the reference library
-from disk on every single call.
-
-\paragraph{9. The right model sits in the right place.}
-The embedder and the index it was built from live in the same process, so the
-correspondence between them is an internal invariant rather than a contract that could
-break at runtime. The generator lives with the tokeniser that measures its budget, which is
-what makes the budget measurable at all. The coordinator holds nothing, which is why it is
-ready in two seconds.
-
-\paragraph{10. Resources are placed according to what each agent needs.}
-The three have very different appetites, and on separate nodes each gets what it requires
-without competing:
-
-\begin{center}
-\begin{tabular}{lrrl}
-\toprule
-Agent & Startup & Resident memory & Node it receives \\
-\midrule
-Coordinator & 2 s & 0.12 GB & 40 cores, 47 GB \\
-Retrieval & 33 s & 1.0 GB & 40 cores, 47 GB \\
-Reconstruction & 3 s & 1.2 GB & 40 cores, 47 GB \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Placed together they would share one node's 40 cores between three model holding
-processes, and the whole system would be as slow to start as its slowest member. Placed
-apart, the coordinator is answering requests while its peers are still loading.
-
-\paragraph{11. Startup is paid once, not per request.}
-The fleet becomes ready in 51 seconds and then stays up. Subsequent test runs against the
-same deployment report the agents ready in zero seconds, because the models are already
-resident. The startup cost is therefore amortised over every run the allocation serves,
-rather than being paid on each invocation.
-
-\paragraph{12. Components can be scaled or replaced independently.}
-Because retrieval is reached only through a documented protocol endpoint, it can be
-restarted, moved to a different node, or replaced by a different implementation without
-touching the generator. The agent card advertises what it offers, so a replacement is
-discoverable rather than hard coded.
-
-\subsection{Operational improvements}
-
-\paragraph{13. Work is never sent into a cold model.}
-Each agent reports \code{models\_loaded} on its health endpoint only after its surrogates
-have finished loading. A caller therefore cannot send a request into a thirty second model
-load and mistake it for a hang, which is exactly what a naive distribution of this workload
-would produce.
-
-\paragraph{14. Deployment checks itself before spending anything.}
-The launcher reads the allocation rather than hard coding node names, and before starting
-any agent it verifies on every node that the environment imports, that the credentials are
-present and that the reference index is visible. A missing prerequisite aborts the launch
-instead of producing a fleet that comes up healthy and then fails on its first real request.
-
-\paragraph{15. The protocol is standard, so the parts are interchangeable.}
-Communication uses A2A over ordinary HTTP with JSON. Any component that speaks it can take
-the place of one of these agents, and any client that speaks it can drive the system,
-without sharing a language, a framework or a process.
-
-\subsection{Summary of the comparison}
-
-\begin{center}
-\begin{tabular}{lll}
-\toprule
-& \textbf{Single agent pipeline} & \textbf{Three node system} \\
-\midrule
-Token budget
-  & never computed
-  & measured, sent, recorded: 3{,}236 \\
-References chosen by
-  & the constant $k = 2$
-  & negotiation against the budget \\
-Budget used
-  & about 11 percent
-  & 91 percent, 2{,}942 tokens \\
-Evidence reaching the model
-  & silently truncated away
-  & 2{,}942 tokens, verified each run \\
-Ordering
-  & a sentence in a prompt
-  & a precondition on every tool \\
-Model loading
-  & per invocation, and per call for retrieval
-  & once per agent, 83x faster searches \\
-Memory
-  & 2.4 GB in one process
-  & 0.12 / 1.0 / 1.2 GB on three nodes \\
-Cores available
-  & 40, shared by all three roles
-  & 120, forty per role \\
-Startup
-  & as slow as the slowest part
-  & concurrent, 51 s, then amortised \\
-Failure in one component
-  & ends the run
-  & isolated, other agents unaffected \\
-Library version agreement
-  & unaskable
-  & fingerprints compared before work \\
-Audit trail
-  & console output
-  & records joined across three nodes \\
-Component testability
-  & one process, no seams
-  & each agent tested alone, 154 tests \\
-Replacing a component
-  & edit the process
-  & swap an endpoint, discovered by card \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{What it does not change}
-
-Two qualifications, stated so the claims above are not read too widely.
-
-There is no speed benefit for a single gap. One gap takes about 212 seconds on three
-nodes, and most of that is the prediction itself, which runs on one machine and cannot be
-divided. The system was not built to be faster at one gap. Several gaps at once would
-pipeline naturally, since retrieval can serve one while reconstruction works on another,
-but that was not measured.
-
-The architecture does not change what the surrogate models compute. Distribution improved
-what can be known about a run, and where the work is placed. It did not alter DNABERT-S or
-GENA-LM themselves.
-
-% =====================================================================
-\section{Scope: what this system does and does not verify}
-\label{sec:limits}
-
-The acceptance check in Section~\ref{sec:gate} verifies that the retrieved evidence
-reached the prediction model, that the produced length is plausible and that the output is
-valid nucleotides. It deliberately says nothing about whether the reconstruction is
-biologically correct.
-
-That is a scoping decision, not an oversight. The previous pipeline computed no measure of
-correctness for the test case used here, so there is no baseline against which an
-improvement or a regression could be claimed. Introducing one now would be a new
-experiment rather than a comparison, and it belongs to the evaluation harness that sits
-outside this system.
-
-The prediction step itself was left unchanged on purpose. Four things were modified around
-it (the position of the evidence in the input, the counters it returns, the sampling
-threshold becoming a parameter, and the initial number of blanks being measured rather
-than guessed), and the sampling procedure was kept identical so that any difference in
-behaviour is attributable to those four and not to a quietly different generator.
-
-What the system contributes is therefore stated precisely: it makes the quantity of
-evidence delivered to the prediction model a measured, recorded and verified number, on
-every run, across three machines. Before this work that quantity did not exist anywhere in
-the code, in the logs or in the results.
-
-% =====================================================================
-\section{Summary}
-
-The previous pipeline chained retrieval and prediction inside one process and asked a
-language model, in English, to call them in the right order. Nothing verified that it did,
-nothing measured what the prediction model actually received, and the retrieved evidence
-was in fact deleted by input truncation before the model ever saw it.
-
-The new system separates the two components onto different machines and makes them
-negotiate. Because the agent that knows the token budget is not the agent that ranks the
-references, the quantity linking them has to be sent across a network, where it can be
-recorded. The multi-agent structure did not make that calculation better; it made the
-calculation exist. Ordering is enforced by preconditions inside each tool rather than
-requested in prose, and no DNA is ever handled by a language model.
-
-Each agent owns its surrogate models and keeps them resident, which makes a search 83
-times faster than one that has to load its embedder first, and lets three components with
-very different memory and startup costs be placed where each of them fits. Because the two
-peers read the reference library independently, they can disagree about which version they
-hold, so the coordinator compares a fingerprint from each before delegating. That question
-cannot even be asked inside a single process.
-
-Running the same task as the original, the system reports that 2{,}942 tokens of retrieved
-evidence reached the prediction model out of a measured budget of 3{,}236, that the input
-was not truncated, and that the requested gap length passed through all three machines
-unchanged. Twelve assertions verify these properties on every run.
-
-The contribution of this work is infrastructural. Specialised agents, each owning the
-specific model its role requires, turn quantities that were previously implicit into
-quantities that are measured, transmitted and checked.
-
-\end{document}
+These limitations concern the surrogate models and the evaluation methodology rather than the
+orchestration. The contribution of this section is infrastructural: moving from a single agent
+holding every responsibility to specialized agents, each owning the specific models its role
+demands, transforms quantities that were previously implicit into quantities that are measured,
+transmitted and verified.
