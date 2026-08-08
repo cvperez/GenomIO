@@ -29,9 +29,20 @@ subtasks such as context retrieval, sequence generation and validation among coo
 peers \cite{li2024survey}. This section realizes that extension. We describe a genuine
 multi-agent system in which three specialized agents, each deployed on a separate compute
 node of the ARES cluster and each owning the specific models its role requires, cooperate
-to fill the same gaps. Although three agents constitute a minimal configuration, it is the
-smallest one that exercises every mechanism a larger distributed deployment would require,
-and Section~\ref{subsec:mas-scaling} examines what generalizes from it.
+to fill the same gaps.
+
+Whereas the previous pipeline was built on LangChain with a cloud-hosted Gemini model, each
+agent here is built on the \textbf{Claude Agent SDK}, which drives the reasoning model
+\texttt{claude-sonnet-4-5} and exposes each agent's capabilities as MCP tools. The same
+reasoning model runs inside all three agents; what distinguishes them is the scientific
+models each one owns and the tools each one can reach. This separation between a
+general-purpose reasoning layer and a domain-specific scientific layer is what allows the
+latter to be described as \textit{surrogate models}, and it is developed in
+Sections~\ref{subsec:mas-architecture} and~\ref{subsec:mas-surrogates}.
+
+Although three agents constitute a minimal configuration, it is the smallest one that
+exercises every mechanism a larger distributed deployment would require, and
+Section~\ref{subsec:mas-scaling} examines what generalizes from it.
 
 The motivation is not distribution for its own sake. Evaluating the single-agent pipeline
 revealed a class of defect that the pipeline is structurally incapable of detecting:
@@ -92,74 +103,110 @@ boundary is never validated, never logged and never reported.
 \label{subsec:mas-architecture}
 
 The multi-agent system distributes the workflow across three agents, each responsible for
-one phase of the task and each hosting the specific models that phase requires. Agents
-communicate using the Agent2Agent (A2A) protocol over HTTP, and every capability an agent
-exposes is declared as a Model Context Protocol (MCP) tool.
+one phase of the task. Agents communicate using the Agent2Agent (A2A) protocol over HTTP,
+and every capability an agent exposes is declared as a Model Context Protocol (MCP) tool.
+
+Each agent is an autonomous process with an identical internal structure, composed of two
+layers that must be distinguished because they play entirely different roles:
+
+\begin{itemize}
+    \item \textbf{A reasoning layer}, provided by the Claude Agent SDK
+    (\texttt{claude-agent-sdk}, version 0.2.132) driving \texttt{claude-sonnet-4-5}. This
+    layer is \textit{identical in all three agents}. It interprets the incoming request,
+    selects which MCP tools to invoke and chooses their parameters, such as how many
+    candidate sequences to request. It performs no scientific computation.
+
+    \item \textbf{A scientific layer}, consisting of the domain-specific models that agent
+    owns. These \textit{differ between agents} and perform the entire computation:
+    DNABERT-S in the retrieval agent, GENA-LM in the reconstruction agent, and none at all
+    in the coordinator.
+\end{itemize}
+
+This two-layer composition is the reason the models of the second layer are described as
+\textit{surrogate models} in Section~\ref{subsec:mas-surrogates}: they are trained networks
+standing in for computations that are exact in principle but too expensive to perform
+directly, invoked by a general-purpose reasoning model that could not perform them itself.
+It also follows that specialization in this system is a property of capability and data
+locality rather than of the language model, since every agent reasons with the same one.
 
 \begin{figure}[H]
     \centering
     \begin{tikzpicture}[
       agent/.style={draw=black!60, rounded corners=3pt, align=center,
-                    minimum width=5.4cm, minimum height=1.75cm, font=\small},
+                    minimum width=6.4cm, minimum height=2.15cm, font=\small},
+      brain/.style={draw=black!45, fill=white, rounded corners=2pt, font=\scriptsize,
+                    inner sep=2.5pt, minimum width=5.9cm, align=center},
       machine/.style={draw=black!35, dashed, rounded corners=4pt, inner sep=9pt},
       ar/.style={-{Stealth[length=3mm]}, very thick},
       lbl/.style={font=\scriptsize, fill=white, inner sep=2pt},
     ]
-      \node[agent, fill=blue!8] (co)
-        {\textbf{Coordinator Agent}\\[2pt]
-         \scriptsize no scientific models\\
-         \scriptsize query construction, acceptance gate};
-      \node[agent, fill=orange!10, below=2.0cm of co] (re)
-        {\textbf{Reconstruction Agent}\\[2pt]
-         \scriptsize GENA-LM BigBird\\
-         \scriptsize token budget, sequence generation};
-      \node[agent, fill=green!8, below=2.0cm of re] (rt)
-        {\textbf{Retrieval Agent}\\[2pt]
-         \scriptsize DNABERT-S + FAISS\\
-         \scriptsize 43{,}575 reference genes};
+      \node[agent, fill=blue!8] (co) {};
+      \node[font=\small\bfseries, anchor=north] at ($(co.north)+(0,-0.12)$) {Coordinator Agent};
+      \node[brain, anchor=north] (cob) at ($(co.north)+(0,-0.52)$)
+           {Claude Agent SDK \textbullet\ \texttt{claude-sonnet-4-5}};
+      \node[brain, anchor=north, fill=black!4] at ($(cob.south)+(0,-0.10)$)
+           {no scientific model \textbullet\ 4 MCP tools};
+
+      \node[agent, fill=orange!10, below=1.55cm of co] (re) {};
+      \node[font=\small\bfseries, anchor=north] at ($(re.north)+(0,-0.12)$) {Reconstruction Agent};
+      \node[brain, anchor=north] (reb) at ($(re.north)+(0,-0.52)$)
+           {Claude Agent SDK \textbullet\ \texttt{claude-sonnet-4-5}};
+      \node[brain, anchor=north, fill=orange!22] at ($(reb.south)+(0,-0.10)$)
+           {surrogate: GENA-LM \textbullet\ 6 MCP tools};
+
+      \node[agent, fill=green!8, below=1.55cm of re] (rt) {};
+      \node[font=\small\bfseries, anchor=north] at ($(rt.north)+(0,-0.12)$) {Retrieval Agent};
+      \node[brain, anchor=north] (rtb) at ($(rt.north)+(0,-0.52)$)
+           {Claude Agent SDK \textbullet\ \texttt{claude-sonnet-4-5}};
+      \node[brain, anchor=north, fill=green!22] at ($(rtb.south)+(0,-0.10)$)
+           {surrogate: DNABERT-S \textbullet\ 3 MCP tools};
 
       \node[machine, fit=(co), label={[font=\scriptsize\ttfamily]above:ares-comp-10}] {};
       \node[machine, fit=(re), label={[font=\scriptsize\ttfamily]above:ares-comp-12}] {};
       \node[machine, fit=(rt), label={[font=\scriptsize\ttfamily]above:ares-comp-11}] {};
 
-      \draw[ar] ($(co.south)+(-0.8,0)$) -- node[lbl,left]{\texttt{message/send}}
-                ($(re.north)+(-0.8,0)$);
-      \draw[ar] ($(re.north)+(0.8,0)$) -- node[lbl,right]{filled sequence}
-                ($(co.south)+(0.8,0)$);
-      \draw[ar] ($(re.south)+(-0.8,0)$) -- node[lbl,left]{request $N$ candidates}
-                ($(rt.north)+(-0.8,0)$);
-      \draw[ar] ($(rt.north)+(0.8,0)$) -- node[lbl,right]{row IDs and scores}
-                ($(re.south)+(0.8,0)$);
+      \draw[ar] ($(co.south)+(-1.1,0)$) -- node[lbl,left]{\texttt{message/send}}
+                ($(re.north)+(-1.1,0)$);
+      \draw[ar] ($(re.north)+(1.1,0)$) -- node[lbl,right]{filled sequence}
+                ($(co.south)+(1.1,0)$);
+      \draw[ar] ($(re.south)+(-1.1,0)$) -- node[lbl,left]{request $N$ candidates}
+                ($(rt.north)+(-1.1,0)$);
+      \draw[ar] ($(rt.north)+(1.1,0)$) -- node[lbl,right]{row IDs and scores}
+                ($(re.south)+(1.1,0)$);
 
-      \node[font=\scriptsize\itshape, right=0.2cm of rt.east, text width=2.9cm]
+      \node[font=\scriptsize\itshape, right=0.15cm of rt.east, text width=2.5cm]
            {negotiation loop, repeated until the window is full};
 
-      \node[left=1.3cm of co, font=\small] (u) {\texttt{test.py}};
+      \node[left=1.2cm of co, font=\small] (u) {\texttt{test.py}};
       \draw[ar] (u) -- (co);
     \end{tikzpicture}
-    \caption{Multi-agent architecture. Each agent runs on a dedicated ARES compute node and
-    owns the models its role requires. The bidirectional link between the reconstruction and
-    retrieval agents is a negotiation over the available token budget, not a single pipeline
-    step. Compare with Figure~\ref{fig:agent-architecture}, where all responsibilities reside
-    in one planner.}
+    \caption{Multi-agent architecture. Every agent runs on a dedicated ARES compute node and
+    contains two layers: an identical reasoning layer, the Claude Agent SDK driving
+    \texttt{claude-sonnet-4-5}, and a scientific layer holding the surrogate model its role
+    requires. The bidirectional link between the reconstruction and retrieval agents is a
+    negotiation over the available token budget, not a single pipeline step. Compare with
+    Figure~\ref{fig:agent-architecture}, in which one planner holds every responsibility.}
     \label{fig:mas-architecture}
 \end{figure}
 
 The three agents are the following:
 
 \begin{itemize}
-    \item \textbf{Coordinator Agent}: executes policy rather than science. It loads no
-    scientific models, constructs the retrieval query from the flanking contigs, verifies
-    that its peers are operational and reading the same reference corpus, delegates the
-    task, and applies an acceptance gate to the result.
+    \item \textbf{Coordinator Agent}: executes policy rather than science, and is the only
+    agent with no scientific layer at all. Its reasoning layer drives four MCP tools that
+    construct the retrieval query from the flanking contigs, verify that its peers are
+    operational and reading the same reference corpus, delegate the task and apply an
+    acceptance gate to the result. Holding no models, it becomes operational in two seconds.
 
-    \item \textbf{Retrieval Agent}: owns the DNABERT-S embedder and the FAISS index over
-    43{,}575 coding sequences. It answers requests for candidates with corpus row
-    identifiers and cosine similarity scores, never with nucleotide sequences.
+    \item \textbf{Retrieval Agent}: its scientific layer holds the DNABERT-S embedder and a
+    FAISS index over 43{,}575 coding sequences. Through three MCP tools it answers requests
+    for candidates with corpus row identifiers and cosine similarity scores, never with
+    nucleotide sequences.
 
-    \item \textbf{Reconstruction Agent}: owns the GENA-LM masked language model. Because it
-    owns the tokenizer, it is the only component able to measure the available context
-    budget, and it therefore drives the negotiation and performs the final prediction.
+    \item \textbf{Reconstruction Agent}: its scientific layer holds the GENA-LM masked
+    language model. Because it owns the corresponding tokenizer, it is the only component
+    able to measure the available context budget, and its six MCP tools therefore drive the
+    negotiation and perform the final prediction.
 \end{itemize}
 
 \subsection{Agent Communication: the A2A Protocol}
@@ -266,15 +313,84 @@ async def measure_budget(args: dict, state: ReconTask) -> dict:
     return errors.tool_ok({"base_tokens": base_tokens, "free_tokens": free})
 \end{lstlisting}
 
+\subsection{Agent Implementation: the Claude Agent SDK}
+\label{subsec:mas-sdk}
+
+Each of the three agents is an LLM-driven process built on the Claude Agent SDK
+(\texttt{claude-agent-sdk}, version 0.2.132), which drives the local Claude command line
+client under subscription authentication rather than an API key. The reasoning model is
+\texttt{claude-sonnet-4-5}, pinned explicitly in the configuration rather than inherited
+from the environment, so that every execution records which model produced it.
+
+Notably, \textbf{the same general-purpose model runs inside all three agents}. What
+distinguishes them is not their reasoning capacity but the tools and the scientific models
+each one can reach. Specialization in this system is a property of capability and of data
+locality, not of the underlying language model.
+
+The SDK is configured identically in each agent, with the MCP server assembled from that
+agent's own tools:
+
+\begin{lstlisting}[language=Python]
+options = ClaudeAgentOptions(
+    system_prompt=self.spec.system_prompt,
+    mcp_servers={self.spec.server_key: self._mcp_server},
+    tools=list(self.spec.allowed_tools),          # restricts the built-in tool set
+    allowed_tools=list(self.spec.allowed_tools),  # only this agent's own tools
+    max_turns=self.spec.max_turns,                # bounds the reasoning loop
+    permission_mode="bypassPermissions",
+    setting_sources=[],                           # ignores ambient configuration
+    model=config.AGENT_MODEL,
+)
+\end{lstlisting}
+
+Two of these settings are load-bearing. Declaring both \texttt{tools} and
+\texttt{allowed\_tools} confines the model to the MCP tools of its own agent; supplying
+\texttt{allowed\_tools} alone was found to leave built-in capabilities reachable. Setting
+\texttt{max\_turns} bounds the reasoning loop irrespective of the model's behaviour. Since
+the tool identifiers are of the form
+\texttt{mcp\_\_\{server\_key\}\_\_\{tool\_name\}}, an agent cannot address a tool belonging
+to another agent even by name; inter-agent requests must travel through A2A.
+
+A typical execution consumes approximately fourteen assistant turns distributed across the
+three agents.
+
+\subsubsection{Two Classes of Model per Agent}
+
+This is the distinction that motivates the terminology used in the following subsection,
+and it is the structural consequence of building agents on a general-purpose LLM. Every
+agent contains models of two entirely different kinds:
+
+\begin{itemize}
+    \item \textbf{A general-purpose reasoning model} (\texttt{claude-sonnet-4-5}, via the
+    Claude Agent SDK), which is identical in all three agents. It interprets the request,
+    selects tools, chooses parameters such as batch sizes, and reacts to the values the
+    tools return. It performs no scientific computation whatsoever: it never embeds a
+    sequence, never searches the index and never predicts a nucleotide.
+
+    \item \textbf{Domain-specific surrogate models} (DNABERT-S in the retrieval agent,
+    GENA-LM in the reconstruction agent), which differ between agents and which perform the
+    entire scientific computation. Every quantity appearing in a result was produced by one
+    of these models or by ordinary arithmetic.
+\end{itemize}
+
+The separation is enforced rather than merely intended: as described in
+Section~\ref{subsec:mas-state}, results are serialized from the task record written by the
+tools, never parsed from the text the reasoning model generates. This is what allows a
+general-purpose model to orchestrate a scientific workflow without becoming a source of
+scientific claims, and it is the reason the two classes of model can be discussed
+separately at all.
+
 \subsection{Specialized Agents and Their Surrogate Models}
+\label{subsec:mas-surrogates}
 
 A defining property of the multi-agent design, and the principal difference from the
 single-agent pipeline, is that each agent hosts the specific models its role requires and no
-others. These are \textit{surrogate models}: trained networks that stand in for computations
-that are exact in principle but prohibitively expensive to perform directly. The retrieval
-agent hosts one, DNABERT-S, and the reconstruction agent hosts the other, GENA-LM, while the
-coordinator hosts none. The language model inside each agent performs none of this scientific
-computation; it decides when the surrogates are invoked and with which parameters.
+others. Following the distinction drawn in Section~\ref{subsec:mas-sdk}, these are the
+\textit{surrogate models}: trained networks that stand in for computations that are exact in
+principle but prohibitively expensive to perform directly, and which the general-purpose
+reasoning model invokes but never replaces. The retrieval agent hosts one, DNABERT-S, the
+reconstruction agent hosts the other, GENA-LM, and the coordinator hosts none, which is why
+it becomes operational in two seconds while its peers require thirty-three and three.
 
 The retrieval agent additionally holds a FAISS index. This is an approximate
 nearest-neighbour structure rather than a trained model, so it is not a surrogate in the
@@ -418,6 +534,7 @@ each invocation of that function, which \texttt{main()} calls twice, once per ex
 arm.
 
 \subsection{Enforcing Correctness: \texttt{runtime/state.py}}
+\label{subsec:mas-state}
 
 Placing a language model in control of the workflow reintroduces the first limitation
 identified in Section~\ref{subsec:mas-motivation}. Three rules prevent this, none of which is
