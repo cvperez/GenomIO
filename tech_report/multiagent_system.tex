@@ -380,6 +380,52 @@ general-purpose model to orchestrate a scientific workflow without becoming a so
 scientific claims, and it is the reason the two classes of model can be discussed
 separately at all.
 
+\subsection{LLM-Based Orchestration}
+\label{subsec:llm-orchestration}
+
+The transition to a multi-agent architecture also raises the question of why
+the workflow is coordinated by language-model agents instead of being
+implemented entirely as a deterministic sequence of function calls. For the
+current gap-filling task, many of the individual operations could indeed be
+connected through a conventional workflow. The purpose of using LLM-based
+orchestration is therefore not to replace deterministic execution where the
+required behavior is already known.
+
+In the implemented architecture, the language model is responsible for deciding
+which available operation should be invoked as the task progresses. The
+operations themselves remain implemented in conventional code. Retrieval,
+token-budget calculation, candidate admission, sequence generation, and result
+validation are performed by MCP tools and scientific models rather than by the
+reasoning model. Similarly, genomic sequences and intermediate results are kept
+in structured task state instead of being generated or transferred through
+natural-language responses.
+
+This distinction is important because the workflow combines decisions made at
+runtime with constraints that must always be preserved. For example, the
+Reconstruction Agent can determine whether additional candidates should be
+requested after inspecting the current state of the task, but it cannot admit
+candidates before the token budget has been measured. Tool preconditions
+enforce this dependency independently of the decision made by the language
+model. The same principle is used for values such as the requested gap length,
+the available context capacity, and the final acceptance criteria.
+
+The three-agent design applies this orchestration locally to the part of the
+workflow where the required information is available. The Retrieval Agent owns
+the ranked candidate pool, while the Reconstruction Agent owns the tokenizer
+and therefore knows how much context can still be admitted. The Coordinator
+does not make these decisions on their behalf; it delegates the task and
+validates the result once reconstruction has completed. This keeps the
+reasoning associated with each stage close to the state and tools required by
+that stage.
+
+The resulting architecture can therefore be described as constrained
+LLM-based orchestration rather than a fully autonomous LLM workflow. Language
+models decide how to proceed within the operations exposed to each agent, while
+deterministic tool handlers define the valid execution boundaries and preserve
+the scientific data. This design was chosen to investigate agent-based
+coordination while avoiding dependence on the language model for operations
+that require exact and reproducible behavior.
+
 \subsection{Specialized Agents and Their Surrogate Models}
 \label{subsec:mas-surrogates}
 
