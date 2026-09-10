@@ -1,5 +1,7 @@
 # Results
 
+> Historical validation report: the measurements and excerpts below are preserved. The cited timestamped logs and JSON artifacts are absent from this checkout. See [README.md](README.md) for current tool behavior, validation limits, and execution instructions. The older ten-assertion summary and later twelve-check listing reflect different documentation stages.
+
 What was built, what was measured, and what the numbers do and do not support.
 All figures below come from runs on this machine; nothing is estimated.
 
@@ -21,7 +23,7 @@ Ten assertions on gap1 of AP012051.1 (870 bases, between `contig1` and `contig2`
 | assertions | 10 / 10 | 10 / 10, every run |
 
 On SLURM the coordinator ran on `ares-comp-10`, retrieval on `ares-comp-11` and
-reconstruction on `ares-comp-12` — one agent per node, talking over the cluster network.
+reconstruction on `ares-comp-12` : one agent per node, talking over the cluster network.
 Four runs in total (one local, three distributed, one of them organism-restricted) and
 every one passed all ten assertions.
 
@@ -61,7 +63,7 @@ Gap1, contigs of 5,951 and 13,996 bases:
 
 That last row is the failure being detected, measured rather than argued about.
 `gap-filler-agents/test.py` took `contigs[0]` and `contigs[1]`; the FASTA is sorted
-longest-first, so those are `contig31` (190,651 bp) and `contig22` (167,069 bp) — two
+longest-first, so those are `contig31` (190,651 bp) and `contig22` (167,069 bp) : two
 contigs with no gap between them, passed alongside gap1's 870 bp target.
 
 ---
@@ -70,7 +72,7 @@ contigs with no gap between them, passed alongside gap1's 870 bp target.
 
 The Reconstruction agent measured 3,236 free tokens and then ran several
 request/admit/extend rounds against the Retrieval agent, ending at 17 candidates and
-2,942 tokens — 91% of the available budget. Under the old fixed `k=2` the same window
+2,942 tokens : 91% of the available budget. Under the old fixed `k=2` the same window
 would have taken roughly 350 tokens, about 11% of it, with no report either way.
 
 The retrieval pool persisting across A2A calls is what makes this cheap: `retrieve_context`
@@ -88,7 +90,7 @@ no further embedding work. Measured directly:
 
 The local and SLURM runs produced **byte-identical** output sequences: same 872 bases,
 same 54.0% GC, same 4.85 3-mer entropy, same 17 admitted row IDs. Given the same admitted
-records, generation is deterministic — `torch.manual_seed` is set at agent startup.
+records, generation is deterministic : `torch.manual_seed` is set at agent startup.
 
 That determinism is *conditional*. Which rows get admitted depends on the batch sizes the
 model chooses, so it is not guaranteed across runs. The test asserts only on invariants,
@@ -126,7 +128,7 @@ This is where honesty matters more than the passing tests.
 
 The predictions are the right length and are valid nucleotides, and they are not DNA.
 Entropy 4.85 against a real 5.58 means the output is more repetitive than genuine
-sequence, and both runs miss the true GC content badly — in opposite directions.
+sequence, and both runs miss the true GC content badly : in opposite directions.
 
 The cause is documented in `docs/gap_filling_known_bugs.md` and is **not fixed here**:
 `predict_until_length` places hundreds of `[MASK]` tokens in a row and fills them all in a
@@ -141,7 +143,7 @@ is a property of a masked language model, and no amount of orchestration moves i
 ### Did it reconstruct the gap? No.
 
 Identity against the true 870-base gap, scored with `Bio.Align.PairwiseAligner`
-(match +1, mismatch −1, gap open −10, extend −1) — **not** the `pairwise2.align.globalxx`
+(match +1, mismatch −1, gap open −10, extend −1), **not** the `pairwise2.align.globalxx`
 used elsewhere in this repository, which charges nothing for mismatches or gaps and rates
 random DNA at 64%:
 
@@ -151,11 +153,11 @@ random DNA at 64%:
 | 3-node, unrestricted | 872 | 33.03% | 2,942 |
 | 3-node, unrestricted (rerun) | 872 | 34.83% | 2,942 |
 | 3-node, restricted | 871 | **42.17%** | 2,861 |
-| *random DNA, same length* | 870 | *35.23%* | — |
-| *the true gap against itself* | 870 | *100.00%* | — |
+| *random DNA, same length* | 870 | *35.23%* | n/a |
+| *the true gap against itself* | 870 | *100.00%* | n/a |
 
 The unrestricted runs sit **below the random floor**. The restricted run sits seven
-points above it, which looks like a signal — and is not one:
+points above it, which looks like a signal, and is not one:
 
 | sequence | GC % | identity |
 |---|---|---|
@@ -177,8 +179,8 @@ treats retrieved context as more tokens rather than as auxiliary evidence it can
 to. No amount of orchestration moves that.
 
 What the system did change is which explanation is available. Before, a disappointing
-score had three candidate causes — retrieval was poor, the context never reached the
-model, or the model cannot use context of this kind — and the outputs could not separate
+score had three candidate causes (retrieval was poor, the context never reached the
+model, or the model cannot use context of this kind) and the outputs could not separate
 them. The second is now ruled out by measurement: 2,942 tokens demonstrably reached the
 generator, with `truncated=False`. That leaves the first and third, and makes them
 testable.
@@ -209,7 +211,7 @@ contrastive training is doing what the benchmark said it would.
 ### On the real gap1 query it is right once, then drifts
 
 AP012051.1 is a *Fusobacterium*; the corpus carries *F. animalis* and *F. polymorphum*,
-4,926 of 43,575 records — an 11.3% prior.
+4,926 of 43,575 records : an 11.3% prior.
 
 | | rank-1 hit | Fusobacterium among admitted |
 |---|---|---|
@@ -218,7 +220,7 @@ AP012051.1 is a *Fusobacterium*; the corpus carries *F. animalis* and *F. polymo
 
 The top-60 hits for the gap1 query are dominated by the wrong genus: 20 *S. aureus*,
 14 *Ca.* Nomurabacteria, 8 *C. psittaci*, 6 *Ca.* Peregrinibacteria. So precision@1 is
-fine — consistent with the 0.655 the embedder benchmark measured — and precision@k
+fine (consistent with the 0.655 the embedder benchmark measured) and precision@k
 collapses below chance as k grows. The agent admits 17 candidates, so it is operating in
 the regime where the ranking has already degraded.
 
@@ -227,7 +229,7 @@ the regime where the ranking has already degraded.
 | | mean GC |
 |---|---|
 | AP012051.1 contigs (query flanks) | 33.7% left, 36.1% right |
-| *Staphylococcus aureus* CDS | **32.5%** — closest of any organism in the corpus |
+| *Staphylococcus aureus* CDS | **32.5%**: closest of any organism in the corpus |
 | *Fusobacterium animalis* CDS | 26.9% |
 | *Fusobacterium polymorphum* CDS | 26.1% |
 
@@ -243,7 +245,7 @@ the corpus are not drawn from the same distribution.
 
 Three things follow, in order of cost:
 
-1. **Restriction rescues it completely** — 27 of 27 correct — and is one field in the
+1. **Restriction rescues it completely** (27 of 27 correct) and is one field in the
    request. When the organism is known, use it.
 2. **Query with CDS-like sequence**, or build a corpus that includes intergenic regions,
    so query and corpus come from the same distribution.
@@ -304,7 +306,7 @@ untrimmed contig31+contig22 = 58776 tokens vs a 4096 window
 Recorded because each one would have been invisible in a passing run.
 
 **The model refused after the tool had already run.** A retrieval turn ended with
-`API Error: Sonnet 4.5 can't help with this` — and the task still completed correctly,
+`API Error: Sonnet 4.5 can't help with this`, and the task still completed correctly,
 because the reply is serialised from state rather than parsed from the model's text.
 Removing the 1,800-base query string from the prompt stopped the refusal recurring and cut
 the call from 46 s to 13 s. The query now lives in agent state; the model chooses *when*
@@ -321,7 +323,7 @@ looked entirely successful.
 
 **The retrieval pool was being destroyed between calls.** `handle_message` dropped task
 state when a request finished, which would have made `extend_context` rebuild the ranking
-every time — or fail with `NO_POOL`. Retrieval sessions now persist by `request_id`.
+every time, or fail with `NO_POOL`. Retrieval sessions now persist by `request_id`.
 
 **gap33 has no right-hand flank.** It runs 1557603–1558103 while the assembly's last
 contig ends at 1557603. 32 of 33 gaps are reconstructable; the terminal one is declined

@@ -1,4 +1,6 @@
-# The Bridge Architecture — Dual-Modality Retrieval for Genomic CDS Records
+# The Bridge Architecture: Dual-Modality Retrieval for Genomic CDS Records
+
+> Historical discussion: retained for its tables, glossary, and design rationale. The [benchmark overview](README.md) and experiment reports describe the current files and evidence limits. Claims about isolated training effects, tokenizer mechanisms, or untested scales are interpretations, not additional measurements. Metadata retrieval and fusion are benchmark implementations, not integrated application features.
 
 **Defined by**: Experiment 3 (proof-of-concept, n=5) and Experiment 4 (scale validation, n=1,000 across 20 species)
 **Used by**: Experiments 5, 6, 9, 10 (retrieval querying and FAISS deployment)
@@ -17,9 +19,9 @@ Each CDS record in `rag_corpus_uniform/` carries **two distinct types of informa
 
 A RAG system over this corpus must support three distinct query modes:
 
-1. **DNA→DNA** — given a DNA sequence, find structurally similar DNA records.
-2. **Text→DNA** — given a metadata description ("oxidoreductase in *Thermus thermophilus*"), retrieve the DNA records most likely to match.
-3. **DNA→Text** — given a DNA sequence, recover the metadata of the most similar records.
+1. **DNA→DNA** : given a DNA sequence, find structurally similar DNA records.
+2. **Text→DNA** : given a metadata description ("oxidoreductase in *Thermus thermophilus*"), retrieve the DNA records most likely to match.
+3. **DNA→Text** : given a DNA sequence, recover the metadata of the most similar records.
 
 The naive design uses **one model + one index** for both modalities. Experiment 3 demonstrates that this design is broken in a non-obvious way; Experiment 4 confirms the breakage at 20-species scale. The bridge architecture is the fix.
 
@@ -29,14 +31,14 @@ The naive design uses **one model + one index** for both modalities. Experiment 
 
 ### 2.1 The false-positive at n=5 (Experiment 3)
 
-Experiment 3 ran DNABERT-S as a unified encoder on both DNA and metadata text. The metadata-on-DNABERT-S silhouette was **0.319** — superficially the highest score in the experiment. Inspection of the cosine similarity matrix revealed why:
+Experiment 3 ran DNABERT-S as a unified encoder on both DNA and metadata text. The metadata-on-DNABERT-S silhouette was **0.319** : superficially the highest score in the experiment. Inspection of the cosine similarity matrix revealed why:
 
-| Pair type | DNABERT-S on metadata text — cosine similarity |
+| Pair type | DNABERT-S on metadata text: cosine similarity |
 |---|---|
 | Same-species (TT/TT) | 0.994 |
 | Cross-species | 0.81 – 0.94 |
 
-All metadata strings collapse into a narrow region of vector space (similarities in [0.81, 1.0]). DNABERT-S tokenises the metadata text with its 6-mer DNA tokeniser, so almost every character maps to `[UNK]`. The result is a near-constant vector for every record. A two-record same-species pair happens to be slightly closer than the rest, which lifts the silhouette into the positive range — but the embeddings carry no actual semantic signal.
+All metadata strings collapse into a narrow region of vector space (similarities in [0.81, 1.0]). DNABERT-S tokenises the metadata text with its 6-mer DNA tokeniser, so almost every character maps to `[UNK]`. The result is a near-constant vector for every record. A two-record same-species pair happens to be slightly closer than the rest, which lifts the silhouette into the positive range, but the embeddings carry no actual semantic signal.
 
 ### 2.2 The collapse at n=1,000 (Experiment 4)
 
@@ -54,7 +56,7 @@ all-MiniLM-L6-v2 (the dedicated natural-language sentence encoder) maintains a p
 
 ### 2.3 Cross-modal coherence: DNA and metadata occupy disjoint regions
 
-Experiment 3 also computed the DNA-vs-metadata cosine similarity matrix inside DNABERT-S space. All values fell in the range 0.009 – 0.205 — DNA and metadata embeddings are nearly orthogonal under DNABERT-S. A DNA query for record A retrieves record A's metadata at rank 4 out of 5 in three of five queries.
+Experiment 3 also computed the DNA-vs-metadata cosine similarity matrix inside DNABERT-S space. All values fell in the range 0.009 – 0.205 : DNA and metadata embeddings are nearly orthogonal under DNABERT-S. A DNA query for record A retrieves record A's metadata at rank 4 out of 5 in three of five queries.
 
 This rules out the alternative of training a shared projection: there is no coherent geometric structure linking the two modalities under a single encoder.
 
@@ -67,7 +69,7 @@ Even if DNABERT-S could embed text usefully (it cannot), the two vector spaces h
 | DNABERT-S | 768 |
 | all-MiniLM-L6-v2 | 384 |
 
-A single FAISS index requires a fixed dimension. Concatenation, padding, or projection would change the geometry. The cleanest solution is a **dual index** — and once you have two indices, the question of how to cross-modal-query becomes a routing question rather than a representation question.
+A single FAISS index requires a fixed dimension. Concatenation, padding, or projection would change the geometry. The cleanest solution is a **dual index**, and once you have two indices, the question of how to cross-modal-query becomes a routing question rather than a representation question.
 
 ---
 
@@ -103,11 +105,11 @@ A single FAISS index requires a fixed dimension. Concatenation, padding, or proj
               records[id_k].dna           records[id_k].metadata_text
 ```
 
-The architecture has three components: two encoder-index pairs and a trivial lookup table. The two indices are independent — they have different dimensions, different models, different optimal FAISS index types, and no shared parameters. The only thing they share is the **row order** of the records list. That is the bridge.
+The architecture has three components: two encoder-index pairs and a trivial lookup table. The two indices are independent : they have different dimensions, different models, different optimal FAISS index types, and no shared parameters. The only thing they share is the **row order** of the records list. That is the bridge.
 
 ---
 
-## 4. The ID bridge — what it actually is
+## 4. The ID bridge: what it actually is
 
 The bridge is **not a learned projection**, not a hash map, not a join key. It is the implicit fact that both indices are built by iterating `records[]` in the same order:
 
@@ -132,11 +134,11 @@ After this, the same integer `k` references the same record everywhere:
 
 A FAISS query against either index returns row indices, not vectors. The bridge is just `records[k]`. No projection layer, no parameters, no training.
 
-This is the entire mechanism. The simplicity is the point — there is nothing to break, nothing to retrain, and no parameter mismatch when one encoder is swapped.
+This is the entire mechanism. The simplicity is the point : there is nothing to break, nothing to retrain, and no parameter mismatch when one encoder is swapped.
 
 ---
 
-## 5. Query routing — three modes
+## 5. Query routing: three modes
 
 ### 5.1 DNA → DNA  (Index A, no bridge needed)
 
@@ -197,8 +199,8 @@ Because Index A is queried in both DNA→DNA and DNA→Text, the rankings are **
 A reasonable-looking alternative would be to train a projection that maps text embeddings into the DNA space (or vice versa) so a single index could serve both modalities. The bridge architecture deliberately rejects this design for three reasons:
 
 1. **No training data for the alignment.** A projection that maps "Thermus thermophilus oxidoreductase" near the DNA embedding of TT_RS00015 would need supervised pairs. The available CDS records are unlabelled at that granularity.
-2. **The cross-modal coherence test failed.** Experiment 3 measured the DNA–metadata cosine in DNABERT-S space and got values in [0.009, 0.205] — no shared structure exists for a linear projection to recover.
-3. **Operational fragility.** Swapping the DNA encoder (say, fine-tuning DNABERT-S on a new corpus) would invalidate the projection. The bridge architecture decouples the two encoders entirely — they can be retrained, replaced, or version-bumped independently.
+2. **The cross-modal coherence test failed.** Experiment 3 measured the DNA–metadata cosine in DNABERT-S space and got values in [0.009, 0.205] (no shared structure exists for a linear projection to recover.
+3. **Operational fragility.** Swapping the DNA encoder (say, fine-tuning DNABERT-S on a new corpus) would invalidate the projection. The bridge architecture decouples the two encoders entirely) they can be retrained, replaced, or version-bumped independently.
 
 ---
 
@@ -211,7 +213,7 @@ A second alternative would be to skip Index B and treat metadata as a structured
 | **Exact filter** | Boolean (include / exclude) | `organism == "Thermus thermophilus"` |
 | **Embedding + cosine** | Continuous similarity score | "oxidoreductase activity, thermophilic bacterium" |
 
-Two protein descriptions — `"SDR family NAD(P)-dependent oxidoreductase"` and `"NAD(P)/FAD-dependent oxidoreductase"` — share meaning but not tokens. A filter cannot relate them; an embedding can. The bridge architecture uses both: embeddings for ranking, optional post-filters for hard constraints (e.g., genus-level restriction applied after FAISS retrieval).
+Two protein descriptions (`"SDR family NAD(P)-dependent oxidoreductase"` and `"NAD(P)/FAD-dependent oxidoreductase"`) share meaning but not tokens. A filter cannot relate them; an embedding can. The bridge architecture uses both: embeddings for ranking, optional post-filters for hard constraints (e.g., genus-level restriction applied after FAISS retrieval).
 
 ---
 
@@ -224,7 +226,7 @@ Two protein descriptions — `"SDR family NAD(P)-dependent oxidoreductase"` and 
 | DNA and metadata spaces are disjoint | Cross-modal cosines in [0.009, 0.205] | (Not re-measured; result is structural) |
 | Dimensions are incompatible | DNABERT-S = 768, MiniLM = 384 | Same |
 
-The combined finding mandates the dual-index design and rules out the alternatives. Everything downstream — the three query modes, the FAISS index choices in Experiments 7–8, the retrieval evaluations in Experiments 5/6/9/10 — assumes this architecture as a given.
+The combined finding mandates the dual-index design and rules out the alternatives. Everything downstream (the three query modes, the FAISS index choices in Experiments 7–8, the retrieval evaluations in Experiments 5/6/9/10) assumes this architecture as a given.
 
 ---
 
@@ -249,9 +251,9 @@ Text→DNA outperforms DNA→DNA by 25 percentage points at rank 1. This is the 
 
 ## 10. Limitations and where the bridge could be extended
 
-- **The two encoders are frozen.** Neither DNABERT-S nor MiniLM is fine-tuned on this corpus. If domain shift becomes severe, both can be replaced or fine-tuned independently — but the bridge mechanism itself does not change.
+- **The two encoders are frozen.** Neither DNABERT-S nor MiniLM is fine-tuned on this corpus. If domain shift becomes severe, both can be replaced or fine-tuned independently (but the bridge mechanism itself does not change.
 - **Metadata quality directly drives Text→DNA accuracy.** The +30 percentage-point lift in Text→DNA P@1 between Experiment 6 (0.601) and Experiment 10 (0.906) came from one fix: correctly resolving organism names from FASTA filename accessions instead of leaving them as `GCF_000008125.1`. The bridge architecture amplifies metadata quality.
-- **No hybrid score.** The current design picks one of the two indices per query; it does not combine A and B scores into a hybrid ranking. A hybrid retriever (e.g., reciprocal rank fusion across the two indices) is a natural extension and would require no architectural change — both indices already return ranked ids on the same row space.
+- **No hybrid score.** The current design picks one of the two indices per query; it does not combine A and B scores into a hybrid ranking. A hybrid retriever (e.g., reciprocal rank fusion across the two indices) is a natural extension and would require no architectural change) both indices already return ranked ids on the same row space.
 - **Single-species-per-record assumption.** Records have one organism label. The architecture does not currently model multi-species or hierarchical (genus, family) similarity. The bridge would still work if metadata were extended with taxonomic strings; only the encoder choice would need re-evaluation.
 
 ---

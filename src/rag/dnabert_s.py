@@ -7,7 +7,7 @@ in embedder_benchmark/. It is a 110M parameter BERT trained with a species aware
 contrastive objective, which is the property that matters here: it pulls sequences from
 the same organism together and pushes different organisms apart. Masked language models
 of the same or much larger size do not do that, however good they are at predicting
-nucleotides. See embedder_benchmark/experiment_2_results.md for the ranking.
+nucleotides. See embedder_benchmark/experiment_2_embedding_benchmark/results/experiment_2_results.md for the ranking.
 
 The loading recipe below has three details that are easy to get wrong and produce either
 a crash or silently wrong vectors:

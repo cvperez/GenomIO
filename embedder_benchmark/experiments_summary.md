@@ -1,8 +1,10 @@
-# Experiments Summary — GenomIO RAG Infrastructure
+# Experiments Summary: GenomIO RAG Infrastructure
+
+> Historical discussion: retained for its tables, glossary, and design rationale. The [benchmark overview](README.md) and experiment reports describe the current files and evidence limits. Claims about isolated training effects, tokenizer mechanisms, or untested scales are interpretations, not additional measurements. Metadata retrieval and fusion are benchmark implementations, not integrated application features.
 
 **Period**: 2026-04-21 – 2026-05-01  
 **Hardware**: CPU-only; Python 3.10; PyTorch 2.11; transformers 5.5.4; faiss 1.13.2  
-**Corpus**: `rag_corpus_uniform/` — 20 CDS-only FASTA files (one per bacterial species)
+**Corpus**: `rag_corpus_uniform/` : 20 CDS-only FASTA files (one per bacterial species)
 
 ---
 
@@ -25,7 +27,7 @@ The mathematical space where embeddings live. Each record is a point in this spa
 A number between −1 and 1 that measures how similar two vectors are, regardless of their magnitude. A value of 1.0 means the vectors point in exactly the same direction (identical); 0.0 means they are orthogonal (unrelated); negative values indicate opposition. In practice, DNA embedding similarities between same-species sequences typically range from 0.5 to 0.9.
 
 ### Silhouette score
-A single number summarising cluster quality, ranging from −1 to +1. A positive score means that, on average, each record is more similar to other records of its own species than to records of any other species — the desired behaviour for retrieval. A score near 0 means the clusters overlap. A negative score means records are actually closer to records from *other* species than their own, which would cause a retrieval system to return wrong results.
+A single number summarising cluster quality, ranging from −1 to +1. A positive score means that, on average, each record is more similar to other records of its own species than to records of any other species: the desired behaviour for retrieval. A score near 0 means the clusters overlap. A negative score means records are actually closer to records from *other* species than their own, which would cause a retrieval system to return wrong results.
 
 ### Intra-species similarity / Inter-species distance
 Intra-species similarity is the average cosine similarity between all pairs of records from the same species. Inter-species distance is 1 minus the average cosine similarity between all pairs of records from *different* species. A good embedding model should have high intra-species similarity (same-species records are close) and high inter-species distance (different-species records are far apart).
@@ -34,34 +36,34 @@ Intra-species similarity is the average cosine similarity between all pairs of r
 A training objective where the model learns to predict randomly masked tokens (nucleotides or words) from context. This produces rich representations of local sequence patterns but does not explicitly optimise for placing similar sequences close together in vector space. As a result, MLM-trained models often perform poorly for nearest-neighbour retrieval tasks.
 
 ### Contrastive training
-A training objective where the model is shown pairs of similar sequences (e.g., two sequences from the same species) and pairs of dissimilar sequences, and is trained to pull similar pairs closer together and push dissimilar pairs further apart in vector space. This directly optimises the property needed for retrieval — which is why contrastively trained models outperform MLM-trained models of similar size in these experiments.
+A training objective where the model is shown pairs of similar sequences (e.g., two sequences from the same species) and pairs of dissimilar sequences, and is trained to pull similar pairs closer together and push dissimilar pairs further apart in vector space. This directly optimises the property needed for retrieval: which is why contrastively trained models outperform MLM-trained models of similar size in these experiments.
 
-### RAG — Retrieval-Augmented Generation
+### RAG: Retrieval-Augmented Generation
 A system architecture where a retrieval component first finds relevant documents from a corpus, and a generative model (e.g., an LLM) uses those documents as context to produce its output. In GenomIO, the retrieval step finds CDS records similar to a query DNA sequence, and those records provide biological context for gap-filling.
 
 ### Dual-modality index
-Because each CDS record has two types of content — a raw DNA nucleotide sequence and a text metadata string (organism name, gene name, protein description) — two separate indices are needed. Index A holds DNA embeddings (DNABERT-S, 768-dimensional vectors). Index B holds text embeddings (all-MiniLM-L6-v2, 384-dimensional vectors). The two indices cannot be merged because they have different dimensions and were produced by incompatible models.
+Because each CDS record has two types of content: a raw DNA nucleotide sequence and a text metadata string (organism name, gene name, protein description): two separate indices are needed. Index A holds DNA embeddings (DNABERT-S, 768-dimensional vectors). Index B holds text embeddings (all-MiniLM-L6-v2, 384-dimensional vectors). The two indices cannot be merged because they have different dimensions and were produced by incompatible models.
 
 ### ID bridge
 The mechanism that connects the two indices. Both indices are built in the same order as the record list, so any record has the same integer row index (e.g., row 42) in both Index A, Index B, and the records list. When a query is run against one index (e.g., a text query finds record 42 in Index B), the corresponding DNA sequence is retrieved by simply looking up `records[42].dna_sequence`. No mathematical projection between embedding spaces is needed.
 
 ### FAISS
-Facebook AI Similarity Search — an open-source library for fast nearest-neighbour search over large collections of vectors. It provides both exact search (guaranteed to return the true closest vectors) and approximate search (faster, with a small chance of missing the closest result). Used in these experiments to replace slow brute-force cosine similarity with a production-ready index.
+Facebook AI Similarity Search: an open-source library for fast nearest-neighbour search over large collections of vectors. It provides both exact search (guaranteed to return the true closest vectors) and approximate search (faster, with a small chance of missing the closest result). Used in these experiments to replace slow brute-force cosine similarity with a production-ready index.
 
 ### IndexFlatIP
-A FAISS index type that performs exact inner-product search. When vectors are L2-normalised (scaled to unit length), inner product equals cosine similarity, so this is equivalent to exact cosine search. It is always 100% accurate but scales linearly with corpus size — every query must compare against every stored vector.
+A FAISS index type that performs exact inner-product search. When vectors are L2-normalised (scaled to unit length), inner product equals cosine similarity, so this is equivalent to exact cosine search. It is always 100% accurate but scales linearly with corpus size: every query must compare against every stored vector.
 
 ### IndexHNSWFlat (HNSW)
 A FAISS index type that builds a multi-layer proximity graph (Hierarchical Navigable Small World). Queries traverse the graph rather than scanning all vectors, giving sub-linear query time. The trade-off is slightly reduced accuracy (a small fraction of queries may not return the exact nearest neighbour) and higher memory. In practice, accuracy stays above 99.7% at the scales tested here.
 
-### P@k — Precision at k
+### P@k: Precision at k
 The fraction of the top-k retrieved results that are relevant (i.e., from the same species as the query). P@1 is the probability that the single top result is correct. P@5 is the fraction of the top 5 results that are correct, and so on. A RAG system typically operates at k=3 to k=5, so P@5 is the most operationally relevant metric.
 
 ### Recall@k
 The fraction of all relevant documents in the corpus that appear in the top-k results. If a query has 49 relevant documents (same-species records) and the top-10 results contain 6 of them, Recall@10 = 6/49 ≈ 0.12. Recall grows as k increases; high recall at small k is desirable.
 
-### MRR — Mean Reciprocal Rank
-The average of 1/rank across all queries, where rank is the position of the first relevant result. MRR=1.0 means every query finds a relevant result at rank 1. MRR=0.5 means the first relevant result is at rank 2 on average. MRR=0.767 (DNA→DNA, Experiment 6) means the first same-species record appears on average at rank ≈ 1.3 — almost always within the top two results.
+### MRR: Mean Reciprocal Rank
+The average of 1/rank across all queries, where rank is the position of the first relevant result. MRR=1.0 means every query finds a relevant result at rank 1. MRR=0.5 means the first relevant result is at rank 2 on average. MRR=0.767 (DNA→DNA, Experiment 6) means the first same-species record appears on average at rank ≈ 1.3: almost always within the top two results.
 
 ### Leave-self-out evaluation
 An evaluation protocol where each record is used as a query against the full corpus, but its own entry is excluded from the results (since retrieving yourself is trivially correct). Ground truth is defined as "same species label = relevant". This gives 1,000 evaluable queries from a 1,000-record corpus without needing a separate test set.
@@ -105,7 +107,7 @@ CDS Record: [DNA sequence] + [Metadata text]
 | Text→DNA | **0.906** | **0.895** | **0.893** | **0.938** | 100% |
 
 > Text→DNA performance jumped from 0.601 (Exp 6) to 0.906 after fixing the organism name
-> bug in metadata text — organism names are now correctly included (e.g., "Thermus thermophilus"
+> bug in metadata text : organism names are now correctly included (e.g., "Thermus thermophilus"
 > instead of accession IDs), making same-species metadata embeddings far more discriminative.
 
 ---
@@ -122,7 +124,7 @@ CDS Record: [DNA sequence] + [Metadata text]
 | 6 | Scaled retrieval | 1,000 seqs, 20 species | DNA→DNA P@1=0.655 MRR=0.767; Text→DNA P@1=0.601 MRR=0.704 | **All modes viable at scale** |
 | 7 | FAISS index construction (PoC) | 5 seqs | IndexFlatIP 12–26× faster than HNSW at small n; both 100% accurate | **Use Flat for small n** |
 | 8 | FAISS index at scale | 100–3,000 seqs | Flat→HNSW crossover at n≈1,000 (DNA) and n≈2,000 (Text) | **Use HNSW for n≥1,000** |
-| 9 | FAISS retrieval (PoC) | 5 seqs | IndexFlatIP reproduces Exp 5 exactly — P@1=1.0, MRR=1.0, 100% FAISS accuracy | **FAISS pipeline verified** |
+| 9 | FAISS retrieval (PoC) | 5 seqs | IndexFlatIP reproduces Exp 5 exactly: P@1=1.0, MRR=1.0, 100% FAISS accuracy | **FAISS pipeline verified** |
 | 10 | FAISS retrieval scaled | 1,000 seqs, 20 species | HNSW 100% accurate; DNA unchanged vs Exp 6; Text→DNA P@1 0.601→0.906 after organism name fix | **Deployment-ready; fix metadata** |
 | 11 | Text-encoder benchmark (Index B) | 1,000 seqs, 20 species, **6 encoders** | SapBERT (P@1 0.974) and e5-base-v2 (0.978) beat MiniLM (0.906) by ~7 pp; general bge upgrades do **not**; MedEmbed is worst | **SapBERT selected for Index B; objective ≫ "domain" label** |
 | 12 | Recall@K curves + RRF fusion | 1,000 seqs, 20 species, 3 retrievers | Text dominates DNA at every K; hit-rate@3≈1.0; DNA is encoder-limited; fusion +0.1 pp recall (only +2.2 pp P@1, and w=2 only) | **Keep Text→DNA primary; fusion optional; next = generation eval** |
@@ -131,7 +133,7 @@ CDS Record: [DNA sequence] + [Metadata text]
 
 ---
 
-## Experiment 1 — Embedding Model Selection (16 candidates, n=5)
+## Experiment 1: Embedding Model Selection (16 candidates, n=5)
 
 ### Why
 The existing RAG system (`src/core/gap_filler_rag.py`) uses `all-MiniLM-L6-v2`, a general
@@ -146,10 +148,10 @@ on Colab A100.
 
 ### What we tested
 Five CDS sequences from 4 bacterial species (2 × *Thermus thermophilus*, 1 each of
-*C. trachomatis*, *S. aureus*, *D. mccartyi*) — same setup as the original 4-model run.
+*C. trachomatis*, *S. aureus*, *D. mccartyi*): same setup as the original 4-model run.
 This is a proof-of-concept scale; Experiment 2 is the diagnostic ranking.
 
-### Results — top of the leaderboard (silhouette ↓)
+### Results: top of the leaderboard (silhouette ↓)
 
 | Rank | Model | Silhouette | Inter-dist | Tokenisation | Training |
 |---|---|---|---|---|---|
@@ -161,26 +163,26 @@ This is a proof-of-concept scale; Experiment 2 is the diagnostic ranking.
 | … | (8 more) | … | … | | |
 | 16 | NT_v2_100M | −0.0472 | 0.912 | k-mer | MLM |
 
-Five NT v2 variants (50M → 2.5B) cluster near silhouette = 0 with inter-distance ≈ 1.0 —
+Five NT v2 variants (50M → 2.5B) cluster near silhouette = 0 with inter-distance ≈ 1.0:
 unstructured embeddings on the unit hypersphere.
 
 ### Key findings (n=5, indicative only)
 - **The n=5 ranking is misleading and Experiment 2 reveals the reversal.** SpliceBERT (#2) drops to #14 at scale; DNABERT_1 (#1) drops to #2; DNABERT_S (#5) rises to **#1**.
-- **NT v2 family is near-random regardless of size.** All 5 variants (50M, 100M, 250M, 500M, 2,500M) score silhouette within ±0.05 of zero — a 50× parameter span produces no useful change. Falsifies the "bigger MLM = better embeddings" assumption.
-- **DNABERT_S has the strongest inter-species distance (0.78)** — the only model that pushes different-species sequences apart while clustering same-species sequences. This is the signature of contrastive training and the property that survives scaling.
+- **NT v2 family is near-random regardless of size.** All 5 variants (50M, 100M, 250M, 500M, 2,500M) score silhouette within ±0.05 of zero: a 50× parameter span produces no useful change. Falsifies the "bigger MLM = better embeddings" assumption.
+- **DNABERT_S has the strongest inter-species distance (0.78)**: the only model that pushes different-species sequences apart while clustering same-species sequences. This is the signature of contrastive training and the property that survives scaling.
 
 ### Conclusion
 > Experiment 1 cannot select the production model on its own. It enumerates 16 candidates
-> and **rules out the entire MLM-only family** as a class — a strong negative finding that
+> and **rules out the entire MLM-only family** as a class: a strong negative finding that
 > justifies focusing on contrastively-trained alternatives. Final selection requires
 > Experiment 2's 20-species evaluation.
 
-See `experiment_1_results.md` for the full 13-row table (10 CPU + 3 GPU after Colab merge)
+See `experiment_1_embedding_benchmark/results/experiment_1_results.md` for the full 13-row table (10 CPU + 3 GPU after Colab merge)
 and per-model heatmaps.
 
 ---
 
-## Experiment 2 — Scaled Embedding Benchmark (16 candidates, n=1,000)
+## Experiment 2: Scaled Embedding Benchmark (16 candidates, n=1,000)
 
 ### Why
 Experiment 1's n=5 silhouette has effectively no statistical power (one same-species pair).
@@ -192,7 +194,7 @@ The diagnostic ranking is at meaningful scale: 1,000 sequences across all 20 ava
 locally; the 3 GPU-only models (NT_2500M, Caduceus, HyenaDNA) ran on Colab A100 and were
 merged via `exp1_gpu.csv` / `exp2_gpu.csv`. All 16 registry models produced numbers.
 
-### Results — full ranking by silhouette
+### Results: full ranking by silhouette
 
 | Rank | Model | Silhouette | Inter-dist | Training |
 |---|---|---|---|---|
@@ -203,7 +205,7 @@ merged via `exp1_gpu.csv` / `exp2_gpu.csv`. All 16 registry models produced numb
 | 5 | NT_2500M (Colab) | 0.0090 | 0.105 | MLM |
 | 6 | GENA_LM | 0.0062 | 0.005 | MLM (BigBird) |
 | 7 | DNABERT_2 | 0.0029 | 0.215 | MLM (BPE) |
-| 7 | GERM (DNABERT-2 fallback) | 0.0029 | 0.215 | — |
+| 7 | GERM (DNABERT-2 fallback) | 0.0029 | 0.215 | n/a |
 | 9 | NT_v2_500M | −0.0065 | 0.992 | MLM |
 | 10 | NT_v2_250M | −0.0083 | 0.991 | MLM |
 | 11 | NT_v2_50M | −0.0108 | 0.983 | MLM |
@@ -215,7 +217,7 @@ merged via `exp1_gpu.csv` / `exp2_gpu.csv`. All 16 registry models produced numb
 
 ### Three ablations the expanded benchmark enables
 
-**The DNABERT family arc — contrastive training, not BPE, is the contribution:**
+**The DNABERT family arc : contrastive training, not BPE, is the contribution:**
 
 | Variant | Tokenisation | Training | Silhouette | Inter-dist |
 |---|---|---|---|---|
@@ -227,7 +229,7 @@ DNABERT_1 → DNABERT_2 changed tokenisation only (6-mer → BPE), and silhouett
 8×. DNABERT_2 → DNABERT_S kept BPE and added contrastive training; silhouette jumped 16×
 and inter-distance tripled. The improvement is entirely from contrastive learning.
 
-**The NT v2 scale curve — MLM does not scale into useful embeddings:**
+**The NT v2 scale curve : MLM does not scale into useful embeddings:**
 
 | Model | Params | Silhouette | Inter-dist |
 |---|---|---|---|
@@ -248,7 +250,7 @@ DNABERT_S for less than 1/5 the silhouette.
 | NT_v2_50M | k-mer | −0.0108 | 0.983 |
 | NT_v2_50M_3mer | **3-mer** | **+0.0139** | **0.657** |
 
-3-mer tokenisation alone can salvage a marginal MLM model — but still cannot reach
+3-mer tokenisation alone can salvage a marginal MLM model, but still cannot reach
 DNABERT_S's level without contrastive training.
 
 ### Key findings
@@ -261,14 +263,14 @@ DNABERT_S's level without contrastive training.
   similarity at n=5 was a domain artefact (mammalian splice-site training applied to bacterial
   CDS records); at 20 species it collapses entire genera into one indistinguishable cluster.
 - **Long-context models do not help on short CDS records.** Caduceus (Mamba, 131k context)
-  and HyenaDNA (Hyena, 1M context) both score negative silhouettes — their long-range
+  and HyenaDNA (Hyena, 1M context) both score negative silhouettes: their long-range
   inductive bias does not translate into discriminative dense representations of 300–900 bp
   sequences. Possible future work: re-evaluate on full genes / operons.
 
 ### Conclusion
 > **DNABERT_S confirmed as production model.** It is the only model in the 16-model benchmark
 > that simultaneously ranks #1 on silhouette (0.0486) AND #1 on inter-species distance
-> (0.646) at n=1,000 — and it does so with a 110M-parameter footprint that is 23× smaller
+> (0.646) at n=1,000: and it does so with a 110M-parameter footprint that is 23× smaller
 > than the only MLM competitor with any positive silhouette (NT_2500M).
 >
 > The DNABERT family arc and the NT v2 scale curve together make the central thesis claim
@@ -292,11 +294,11 @@ Visual reading of the figure: DNABERT_S shows visibly separated species clusters
 and GROVER show partial separation with significant overlap; NT_v2_50M_3mer shows a
 loosely structured embedding space; NT_2500M shows residual clustering consistent with its
 weak positive silhouette. All 11 models below this top-5 would show a single dense blob
-under the same UMAP — they are excluded from the figure for that reason.
+under the same UMAP : they are excluded from the figure for that reason.
 
 ---
 
-## Experiment 3 — Dual-Modality Embedding Strategy
+## Experiment 3: Dual-Modality Embedding Strategy
 
 ### Why
 CDS records contain two types of information: a raw DNA nucleotide sequence and structured
@@ -308,7 +310,7 @@ modalities, or whether a separate text model is needed.
 ### What we tested
 The same 5 CDS records from Experiment 1, tested with three embedding configurations:
 1. DNABERT-S on raw DNA sequences (replication of Experiment 1)
-2. DNABERT-S on metadata text strings (control — can it handle English?)
+2. DNABERT-S on metadata text strings (control: can it handle English?)
 3. `all-MiniLM-L6-v2` on metadata text strings (general-purpose text baseline)
 
 Also measured: cross-modal DNA→metadata cosine similarity in DNABERT-S space (rows=DNA,
@@ -331,7 +333,7 @@ T.thermophilus_1: rank 4/5 | T.thermophilus_2: rank 5/5 | C.trachomatis: rank 4/
 - **DNABERT-S silhouette on text (0.319) is a false positive.** The 6-mer DNA tokeniser maps
   all English text characters to `[UNK]`, producing nearly identical vectors for all records
   (all similarities 0.81–0.99). The TT pair marginally clusters above this uniform background
-  — not because the model understands the organism names, but because it produces near-constant
+ : not because the model understands the organism names, but because it produces near-constant
   embeddings with a tiny variance that happens to favour the most similar pair.
 - **Cross-modal retrieval completely fails**: DNA queries retrieve their own metadata record
   at rank 4/5 or 5/5. DNABERT-S DNA embeddings and metadata embeddings occupy different
@@ -350,11 +352,11 @@ T.thermophilus_1: rank 4/5 | T.thermophilus_2: rank 5/5 | C.trachomatis: rank 4/
 
 ---
 
-## Experiment 4 — Dual-Modality Strategy Validation at Scale
+## Experiment 4: Dual-Modality Strategy Validation at Scale
 
 ### Why
 Experiment 3 was run on only 5 sequences (4 species). The DNABERT-S metadata silhouette
-(0.319) appeared high — a potential false positive that needed statistical exposure at scale.
+(0.319) appeared high: a potential false positive that needed statistical exposure at scale.
 
 ### What we tested
 Same three embedding configurations as Experiment 3, scaled to 1,000 sequences (50/species
@@ -371,13 +373,13 @@ Same three embedding configurations as Experiment 3, scaled to 1,000 sequences (
 ### Key findings
 - **The false positive is fully exposed**: DNABERT-S on text goes from +0.319 (4 species,
   5 sequences) to **−0.042** (20 species, 1,000 sequences). A negative silhouette means
-  records are closer to sequences from other species than to their own — the model would
+  records are closer to sequences from other species than to their own: the model would
   **actively degrade retrieval quality** if used as a metadata encoder.
 - The drop mechanism is clear: at 4 species, the near-uniform UNK embeddings happened to
   produce a marginal TT-pair advantage. At 20 species, there are more cross-species
   neighbours pulling each record away from its cluster, flipping the silhouette negative.
 - **all-MiniLM-L6-v2 maintains a positive silhouette (+0.042)** across 20 species and
-  1,000 sequences. It runs at 0.006 s/seq — 18× faster than DNABERT-S for metadata.
+  1,000 sequences. It runs at 0.006 s/seq: 18× faster than DNABERT-S for metadata.
 
 ### Conclusion
 > **The dual-modality strategy is confirmed at scale.** Using DNABERT-S for metadata is
@@ -386,7 +388,7 @@ Same three embedding configurations as Experiment 3, scaled to 1,000 sequences (
 
 ---
 
-## Experiment 5 — Retrieval Querying (Proof of Concept)
+## Experiment 5: Retrieval Querying (Proof of Concept)
 
 ### Why
 Experiments 1–4 evaluated embedding quality in isolation (silhouette, intra/inter similarity).
@@ -415,7 +417,7 @@ truth: same species label = relevant document.
 - The score gap is large and unambiguous: DNA→DNA TT pair similarity = 0.813 vs next-best
   0.349; Text→DNA TT pair similarity = 0.944 vs next-best 0.748.
 - **The ID bridge works transparently**: cross-modal queries do not require a shared embedding
-  space — a DNA query retrieves by sequence similarity, and the metadata of those records is
+  space: a DNA query retrieves by sequence similarity, and the metadata of those records is
   returned by record ID. No projection layer, no shared space.
 - DNA→Text correctly returns the matching organism name and protein description at rank 1.
 
@@ -425,7 +427,7 @@ truth: same species label = relevant document.
 
 ---
 
-## Experiment 6 — Scaled Retrieval (1,000 Records, 20 Species)
+## Experiment 6: Scaled Retrieval (1,000 Records, 20 Species)
 
 ### Why
 Experiment 5 had only 5 records and 2 evaluable queries (only the TT pair had same-species
@@ -448,7 +450,7 @@ ranking. Metrics: P@1, P@5, P@10, P@20, Recall@10, Recall@20, MRR.
 - **DNA→DNA and DNA→Text are identical** because both search Index A. The ID bridge for
   DNA→Text correctly routes the result to metadata.
 - **MRR = 0.767** for DNA→DNA means the first relevant document appears on average at rank
-  ≈ 1.3 — within the first two results in the vast majority of queries.
+  ≈ 1.3: within the first two results in the vast majority of queries.
 - **P@k decay** (0.655 → 0.528 for k=1 to k=20) is expected: same-species records are
   concentrated near rank 1, and beyond the top few results the ranking becomes mixed as
   functionally conserved genes appear across species.
@@ -457,7 +459,7 @@ ranking. Metrics: P@1, P@5, P@10, P@20, Recall@10, Recall@20, MRR.
   species names ("Thermus thermophilus"), reducing inter-species text separation. Fixing this
   is expected to bring Text→DNA closer to DNA→DNA performance.
 - **Recall@20 = 0.216** means the top-20 results capture ~21.6% of the 49 relevant documents
-  per query — reasonable given that CDS sequences from the same species span diverse gene
+  per query: reasonable given that CDS sequences from the same species span diverse gene
   families that do not all cluster tightly in embedding space.
 
 ### Conclusion
@@ -469,7 +471,7 @@ ranking. Metrics: P@1, P@5, P@10, P@20, Recall@10, Recall@20, MRR.
 
 ---
 
-## Experiment 7 — FAISS Index Construction (Proof of Concept, 5 Records)
+## Experiment 7: FAISS Index Construction (Proof of Concept, 5 Records)
 
 ### Why
 Experiments 1–6 used brute-force cosine similarity (sklearn). A production RAG system requires
@@ -496,7 +498,7 @@ brute-force cosine, serialised memory (bytes).
 
 ### Key findings
 - **Both index types are 100% accurate** at n=5. At this size, HNSW builds an exact graph
-  over all 5 nodes — approximation does not apply.
+  over all 5 nodes: approximation does not apply.
 - **IndexFlatIP is 12–26× faster than HNSW** at n=5. HNSW's graph traversal overhead
   (pointer chasing, efSearch candidate evaluation) dominates over the trivial brute-force
   scan of 5 vectors.
@@ -504,12 +506,12 @@ brute-force cosine, serialised memory (bytes).
 
 ### Conclusion
 > **FAISS integration validated.** At n=5, IndexFlatIP is the correct choice: exact, faster,
-> and smaller. HNSW's speed advantage requires a minimum corpus size to materialise —
+> and smaller. HNSW's speed advantage requires a minimum corpus size to materialise :
 > determined in Experiment 8.
 
 ---
 
-## Experiment 8 — FAISS Index at Scale (100–3,000 Records)
+## Experiment 8: FAISS Index at Scale (100–3,000 Records)
 
 ### Why
 Experiment 7 showed HNSW is slower than flat at n=5. The theoretical advantage of HNSW
@@ -522,7 +524,7 @@ Both index types (IndexFlatIP, IndexHNSWFlat M=32) for both modalities (DNA 768-
 384-dim) at 6 corpus sizes: 100, 250, 500, 1,000, 2,000, 3,000 vectors. Full embeddings
 generated from 3,000 records (150/species × 20 species); sub-sampled for each test size.
 
-### Results — Latency Crossover
+### Results: Latency Crossover
 
 **DNA Index (768-dim):**
 
@@ -570,14 +572,14 @@ sub-100% values reflect float32 vs float64 tie-breaking, not genuine retrieval e
 ### Conclusion
 > **IndexHNSWFlat(M=32) is the recommended FAISS index type** for the current RAG corpus
 > (n ≥ 1,000 records). The crossover from flat to HNSW occurs at n ≈ 1,000 for the DNA
-> index and n ≈ 2,000 for the text index — well within the operational range of the system.
+> index and n ≈ 2,000 for the text index: well within the operational range of the system.
 > At IOWarp petabyte scale, IndexIVFPQ should replace HNSW to control memory footprint.
 
 ---
 
 ---
 
-## Experiment 9 — FAISS Retrieval Querying (Proof of Concept)
+## Experiment 9: FAISS Retrieval Querying (Proof of Concept)
 
 ### Why
 Experiments 5 and 6 validated retrieval quality using brute-force cosine similarity (sklearn).
@@ -604,7 +606,7 @@ query latency, top-1 accuracy vs brute-force, and memory.
 | DNA→Text | 1.000 | 0.500 | 0.333 | 1.000 |
 
 ### Key findings
-- **Exact match with Experiment 5**: P@1=1.0 and MRR=1.0 for all 3 query types — FAISS
+- **Exact match with Experiment 5**: P@1=1.0 and MRR=1.0 for all 3 query types: FAISS
   IndexFlatIP produces identical rankings to brute-force cosine at n=5.
 - **100% FAISS accuracy**: no retrieval errors vs brute-force baseline.
 - **Sub-4 µs query latency** for both indices. FAISS pipeline is correctly wired end-to-end.
@@ -616,7 +618,7 @@ query latency, top-1 accuracy vs brute-force, and memory.
 
 ---
 
-## Experiment 10 — FAISS Retrieval Querying (Scaled, 1,000 Records)
+## Experiment 10: FAISS Retrieval Querying (Scaled, 1,000 Records)
 
 ### Why
 Experiment 9 confirmed the FAISS pipeline at n=5. Experiment 10 scales to 1,000 records
@@ -646,11 +648,11 @@ Metrics: P@1/5/10/20, Recall@10/20, MRR. Comparison vs Experiment 6 brute-force 
 
 | Query type | Metric | Exp 6 | Exp 10 (FAISS) | Δ | Cause |
 |------------|--------|-------|----------------|---|-------|
-| DNA→DNA | P@1 | 0.655 | 0.655 | 0.000 | No change — FAISS exact |
+| DNA→DNA | P@1 | 0.655 | 0.655 | 0.000 | No change: FAISS exact |
 | DNA→DNA | MRR | 0.767 | 0.766 | −0.001 | Rounding only |
 | Text→DNA | P@1 | 0.601 | **0.906** | **+0.305** | **Organism name bug fix** |
 | Text→DNA | MRR | 0.704 | **0.938** | **+0.234** | **Organism name bug fix** |
-| DNA→Text | P@1 | 0.655 | 0.655 | 0.000 | No change — FAISS exact |
+| DNA→Text | P@1 | 0.655 | 0.655 | 0.000 | No change: FAISS exact |
 
 ### Key findings
 - **DNA→DNA and DNA→Text unchanged**: HNSW at n=1,000 is lossless (100% accuracy vs
@@ -659,14 +661,14 @@ Metrics: P@1/5/10/20, Recall@10/20, MRR. Comparison vs Experiment 6 brute-force 
   not FAISS. Including correct species names in metadata text makes same-species records
   far more similar in MiniLM space. Text→DNA is now the **highest-performing query mode**
   (P@1=0.906, MRR=0.938), surpassing DNA→DNA (P@1=0.655).
-- **HNSW accuracy 100%** at n=1,000 with efSearch=64 — no approximation cost.
+- **HNSW accuracy 100%** at n=1,000 with efSearch=64: no approximation cost.
 - **Organism name fix is critical**: a metadata formatting issue, not a model issue,
   was suppressing 30 percentage points of retrieval performance in Experiment 6.
 
 ### Conclusion
 > **FAISS-based retrieval is deployment-ready at n=1,000 with zero quality degradation.**
 > HNSW for DNA and Flat for Text are the correct index choices at this scale. The organism
-> name fix raises Text→DNA P@1 from 0.601 to 0.906 — this fix must be applied to the
+> name fix raises Text→DNA P@1 from 0.601 to 0.906: this fix must be applied to the
 > production metadata pipeline before deployment.
 
 ---

@@ -1,307 +1,198 @@
 # GenomIO Multi-Agent System
 
-Three A2A agents that fill a gap in a draft genome using DNABERT-S retrieval and
-GENA-LM generation. Each agent is driven by a language model through the Claude Agent
-SDK; every capability it has is an MCP tool.
+## Overview
 
-It replaces the LangChain pipeline in `gap-filler-agents/`, which could not run and would
-not have been trustworthy if it had. What it adds is one number: **how many tokens of
-retrieved context actually reached the generator**, gated so nothing is returned when
-that number is zero.
+This implementation coordinates retrieval-augmented reconstruction of a gap between two genomic contigs. Three agents use the Claude Agent SDK to select and invoke MCP tools. DNABERT-S supplies DNA retrieval; GENA-LM supplies masked-language-model generation. The system records how much retrieved context is admitted and evaluates the output's length and alphabet.
 
+It is separate from the older LangChain workflow in [gap-filler-agents/](../gap-filler-agents). Its purpose is to make retrieval, context admission, and reconstruction outcomes observable. An accepted result is not evidence that the missing biological sequence was recovered.
+
+## Architecture
+
+```text
+test.py: load the gap and its adjacent contigs
+    |
+    v
+Coordinator (8100): prepare, delegate, evaluate, trace
+    | A2A message/send
+    v
+Reconstruction (8102): measure budget, admit candidates, generate
+    | A2A message/send, repeated batch requests
+    v
+Retrieval (8101): DNABERT-S + FAISS, persistent ranked pool
+    |
+    +--> row IDs and scores returned to Reconstruction
+
+Reconstruction resolves rows against the local corpus store,
+returns generation data to Coordinator, then Coordinator returns
+the sequence with its verdict and trace to the caller.
 ```
-                       Coordinator  (no models, ~2 s startup)
-                            |  A2A: message/send
-                            v
-                     Reconstruction  (GENA-LM, ~3 s startup)
-                            |  A2A: message/send   <-- the negotiation edge
-                            v
-                       Retrieval  (DNABERT-S + FAISS, ~30 s startup)
+
+The three roles run as separate processes locally or on allocated SLURM nodes. [agents/](agents) defines their prompts and state-to-artifact conversion; [tools/](tools) implements capabilities; [a2a/](a2a) implements transport; [runtime/](runtime) provides the SDK loop, state registry, guards, and launcher. The directory layout is unchanged.
+
+## Agent Responsibilities
+
+### Coordinator Agent
+
+[agents/coordinator.py](agents/coordinator.py) validates that both contigs and a positive target length are supplied. It builds the retrieval query from the gap-adjacent flanks, checks peer readiness and reported corpus fingerprints, delegates reconstruction, and evaluates the returned sequence. It loads no DNA embedding or generation model; its orchestration still uses the configured agent LLM.
+
+### Reconstruction Agent
+
+[agents/reconstruction.py](agents/reconstruction.py) owns the GENA-LM tokenizer/model. It measures the available context budget, requests candidate batches, resolves corpus rows locally, admits sequences that fit, and generates the gap sequence. A stable `pool-<task_id>` request ID allows several retrieval calls to use the same ranking.
+
+### Retrieval Agent
+
+[agents/retrieval.py](agents/retrieval.py) owns the DNABERT-S embedder and cached FAISS index. It opens a ranked pool and returns row IDs, cosine scores, and pool status in batches. It supports unrestricted search and organism-restricted search. `describe_rows` provides metadata for already served rows. It does not return retrieved nucleotide sequences to Reconstruction; Reconstruction reads those from its local record store.
+
+## Communication
+
+The [A2A client](a2a/client.py) sends JSON-RPC 2.0 `message/send` requests to `POST /`. Message `DataPart` objects carry structured input; `contextId` groups related tasks. Coordinator delegates `op="reconstruct"` with the contigs, target length, query, and optional organism. Reconstruction sends `op="retrieve"` or `op="extend"`, a stable `request_id`, and a requested batch size to Retrieval.
+
+Each request creates an A2A task. Results are artifacts containing structured `DataPart` data serialized from tool-maintained state. Optional `TextPart` narrative is advisory; callers read structured artifacts rather than parsing model prose. Initial agent prompts contain identifiers and sequence lengths instead of the full DNA payload. Tool summaries can include a 60-character generated-sequence preview, so the implementation does not exclude all nucleotide text from LLM-visible results.
+
+The transport also implements `tasks/get`, `tasks/cancel`, `GET /tasks/{id}`, `GET /health`, and agent cards at `/.well-known/agent-card.json` and `/.well-known/agent-configuration`. `message/send` waits for the task result. Streaming, push notifications, file parts, and authentication are not implemented. These endpoints are intended for a trusted execution network.
+
+The [task registry](runtime/state.py) stores state in memory. Retrieval sessions persist across requests; they do not survive process restart. Task deadlines are checked at tool entry, and calls have budgets. These checks do not constitute an interrupt of an already running model operation. The task store prevents rewriting terminal status; protocol completion and the biological acceptance verdict are separate concepts.
+
+## Tools
+
+MCP names use `mcp__<server_key>__<tool_name>`. The server keys are `coordinator_agent`, `retrieval_agent`, and `reconstruction_agent`. The runtime checks registered names against allowed tools and supplies both `tools` and `allowed_tools` to the SDK.
+
+| Agent | Tool | Role in the workflow |
+|---|---|---|
+| Coordinator | `prepare_query` | Slice query flanks, check peers and reported corpus identity, select retrieval mode |
+| Coordinator | `delegate_reconstruction` | Send the prepared request and retain the peer result |
+| Coordinator | `evaluate_result` | Apply the length, alphabet, and admitted-context gate |
+| Coordinator | `emit_trace` | Return the run record; final serialization also builds a trace |
+| Retrieval | `retrieve_context` | Open/reuse a ranked pool and serve a batch |
+| Retrieval | `extend_context` | Serve the next pool slice without re-embedding |
+| Retrieval | `describe_rows` | Describe organism/protein metadata for served rows |
+| Reconstruction | `measure_budget` | Tokenize flanks and reserve mask/safety positions |
+| Reconstruction | `request_candidates` | Open the peer pool with an agent-chosen batch size |
+| Reconstruction | `extend_candidates` | Request more candidates from that pool |
+| Reconstruction | `admit_candidates` | Resolve row IDs, count tokens, admit records that fit |
+| Reconstruction | `generate` | Invoke the masked fill and retain sequence/counters |
+| Reconstruction | `report_state` | Return phase, budget, counts, and trace diagnostics |
+
+Implementations: [coordinator tools](tools/coordinator_tools.py), [retrieval tools](tools/retrieval_tools.py), and [reconstruction tools](tools/reconstruction_tools.py).
+
+## Execution Flow
+
+1. [dataset.py](dataset.py) reads contig FASTA headers and gap TSV coordinates. It selects the contig ending at the gap start and the one beginning at the gap end. Missing or ambiguous flanks fail preflight; the loader does not simply take the first two FASTA records.
+2. Coordinator prepares the query and checks that Retrieval and Reconstruction report ready and have matching corpus fingerprints, then delegates.
+3. Reconstruction trims the model flanks and measures free token positions. Its LLM chooses candidate batch sizes within the configured bounds.
+4. Retrieval embeds the query and creates a pool. Reconstruction reads offered rows from its local corpus store and admits sequences that fit. Additional batches reuse the pool until generation is requested or the pool is exhausted.
+5. [tools/mlm.py](tools/mlm.py) assembles context before the flanks and mask slot, performs the existing masked-fill length search, and returns the sequence plus attempts, token lengths, truncation, and alphabet diagnostics.
+6. Coordinator evaluates the result and returns a sequence, verdict, and trace. A rejected sequence remains available for inspection. A completed A2A task is not necessarily an `ACCEPTED` reconstruction.
+
+## Retrieval and Context Management
+
+The default retrieval query uses 900 bases from each side of the gap. Model input separately retains up to 2,000 bases from each flank; `GENOMIO_MODEL_FLANK=0` disables that trimming. Reconstruction computes:
+
+```text
+free_tokens = max(0, MAX_LENGTH - base_tokens - seed_mask_count - SAFETY_TOKENS)
 ```
 
----
+`base_tokens` is measured with the context slot empty. The initial mask count uses the tokenizer's measured bases-per-token ratio on the actual flanks. Defaults are a 4,096-token window and 32 safety tokens.
 
-## Quick start
+Candidates are tokenized individually. A whole record is admitted when its cost fits; an oversized record is skipped, allowing later shorter records to fit. Already admitted rows are not added twice. The `free_tokens` argument must equal the stored remaining budget. The counter `context_tokens_admitted` sums admission costs; it is not an attention measurement or proof of biological use. The assembled input is measured separately and `truncated` is reported because subsequent mask-count adjustments can change its size.
+
+The local [corpus store](tools/corpus_store.py) indexes byte offsets in `.cache/rag_index/records.jsonl`. Peer fingerprints use the manifest contents and records-file size, not a full hash of every sequence. [Organism lookup](tools/organism_index.py) resolves names and unambiguous partial matches to contiguous row ranges. Restricted retrieval over-fetches and filters rows; a range-selector fallback is attempted if no rows remain. Neither a metadata embedding index nor rank fusion is used here.
+
+## Validation
+
+The [acceptance gate](gate.py) checks a nonempty output, characters within `ACGTN`, positive admitted-context count, and length error no larger than `max(3, ceil(TOLERANCE * gap_length))`. The default tolerance is 0.05. Rejection reasons include `EMPTY`, `LENGTH`, `ALPHABET`, and `NO_CONTEXT`.
+
+Additional safeguards and tests cover different properties:
+
+- Tool guards require known state and prerequisite phases, and check deadlines/call budgets before running handlers. Generation requires admitted context and the original target length.
+- Admission validates row bounds, duplicates, and budget consistency. It does not independently enforce that every requested row was previously offered; the integration harness compares consumed/offered counts, not complete row-set provenance.
+- [test.py](test.py) checks completion, acceptance, nonzero admission, candidate counts, length, alphabet, absence of truncation, unchanged target length, returned retrieval fields, retrieval mode, tool confinement, and pool reuse.
+- [tests/](tests) covers protocol behavior, state/tool contracts, corpus access, flank selection, generation helpers, gate behavior, naming, and deployment parsing using lightweight fixtures where possible.
+
+The gate itself does not check truncation, homology, sequence identity, or correct use of the retrieved biology. No property should be inferred solely from the number of passing assertions.
+
+## Deployment and Execution
+
+### Dependencies and preparation
+
+The documented deployment targets Linux/Bash, locally or on the ARES SLURM cluster. It requires Python, the project ML/retrieval dependencies in [requirements.txt](../requirements.txt), the Claude Agent SDK and its MCP dependencies, and `httpx` for the asynchronous A2A client. The SDK is not listed in the root requirements. Historical runs in [RESULTS.md](RESULTS.md) record Python 3.10.12 and SDK 0.2.132; there is no fully pinned environment for reproducing them.
+
+The existing launch procedure creates a virtual environment inheriting the installed ML stack. From the repository root:
 
 ```bash
-# once: an isolated virtualenv that inherits torch/faiss/transformers from the system
 python3 -m venv --system-site-packages multiagent_system/.venv
 multiagent_system/.venv/bin/pip install claude-agent-sdk
+```
 
-# unit and contract tests -- no LLM, no models, ~4 s
-multiagent_system/.venv/bin/python3 -m pytest multiagent_system/tests \
-    -c multiagent_system/pytest.ini
+The agents use the authenticated Claude CLI. `runtime/launcher.py`, the local fleet, and `deploy.sh` remove `ANTHROPIC_API_KEY` from their launch environment to use CLI authentication. Credentials and remote model access must already be available; they are not provided by this repository.
 
-# end to end on one host: launches three agents, fills gap1, asserts, tears down
+Build the shared DNA index before launching Reconstruction, whose corpus store requires the cached records:
+
+```bash
+python3 scripts/build_rag_index.py --check
+python3 scripts/build_rag_index.py
+```
+
+The build can download model weights and take substantial CPU time. All agents need the same `.cache/rag_index/` and corpus snapshot. Model warm-up loads GENA-LM for Reconstruction and DNABERT-S/FAISS for Retrieval before they report ready.
+
+### Local execution
+
+```bash
 multiagent_system/.venv/bin/python3 multiagent_system/test.py --mode local
+```
 
-# end to end across three ARES nodes
-salloc -N 3 -p compute -t 02:00:00 --no-shell -J genomio-mas    # note the JOBID
+The harness launches three processes, waits for health readiness, submits the default AP012051.1 gap1 case, checks the result, saves JSON, and tears down the processes. It accepts `--accession`, `--gap`, `--organism`, `--base-port`, `--threads`, `--ready-timeout`, and `--keep-alive`. The default case is an 870-base gap. This is a live model-backed run, not a lightweight test.
+
+### SLURM execution
+
+The checked-in [deploy.sh](deploy.sh) demonstrates one role per node on ARES:
+
+```bash
+salloc -N 3 -p compute -t 02:00:00 --no-shell -J genomio-mas
 ./multiagent_system/deploy.sh <JOBID>
 multiagent_system/.venv/bin/python3 multiagent_system/test.py --mode slurm
 scancel <JOBID>
 ```
 
-The venv is required: `claude_agent_sdk` and `mcp` live only inside it, and installing
-them there rather than into the user site-packages is what keeps the existing
-torch/transformers/faiss stack untouched. Rollback is `rm -rf multiagent_system/.venv`.
+Replace `<JOBID>` with the allocation ID. The script also supports `--alloc`. It resolves allocated hosts, sets peer URLs, starts roles using SSH with an `srun --overlap` fallback, and records endpoints under `.run/`. The harness can instead take `--endpoints-file` or `--endpoints`. Shared repository/cache/credentials and the cluster's temporary-storage layout are deployment assumptions in the script, not general multi-cluster portability guarantees.
 
-Authentication is the `claude` CLI subscription. `ANTHROPIC_API_KEY` is unset by both
-the launcher and `deploy.sh`, so a stray key in a shell cannot silently switch billing to
-API credits.
+### Configuration and outputs
 
----
+[config.py](config.py) is the source of defaults; supported environment overrides include:
 
-## The three agents
-
-### Coordinator — `agents/coordinator.py`, port 8100
-
-Loads no models and wraps no RAG code. Slices the retrieval query flanks, checks its
-peers are healthy and reading the same corpus, delegates, and applies the acceptance
-gate.
-
-| Tool | Purpose |
-|---|---|
-| `prepare_query` | Slice the query, verify peers, choose restricted vs unrestricted |
-| `delegate_reconstruction` | Hand the task to the reconstruction agent over A2A |
-| `evaluate_result` | Apply the acceptance gate |
-| `emit_trace` | Produce the run record |
-
-### Retrieval — `agents/retrieval.py`, port 8101
-
-Owns DNABERT-S and the 43,575-vector FAISS index, loaded once at startup.
-
-| Tool | Purpose |
-|---|---|
-| `retrieve_context` | Open a ranked candidate pool, serve the first batch |
-| `extend_context` | Serve the next batch — no re-embedding |
-| `describe_rows` | Organism and protein metadata for rows already served |
-
-**It returns row IDs and cosine scores, never nucleotides.**
-
-### Reconstruction — `agents/reconstruction.py`, port 8102
-
-Owns GENA-LM, so it is the only component that knows the token budget.
-
-| Tool | Purpose |
-|---|---|
-| `measure_budget` | Tokenize the base input; report free positions of 4,096 |
-| `request_candidates` | Ask retrieval for a batch sized to that budget |
-| `extend_candidates` | Ask for more when room remains |
-| `admit_candidates` | Resolve row IDs, tokenize each, admit what fits |
-| `generate` | Run the masked fill |
-| `report_state` | Read-only diagnostic |
-
----
-
-## The three invariants
-
-These are the reason the system is worth building, and each is enforced by code rather
-than requested in a prompt.
-
-### 1. The answer is read from state, never from the model's text
-
-Tool handlers write to a per-task state object; the A2A reply is serialised from that
-state. The model's prose becomes an advisory `TextPart` that nothing reads.
-
-This is not theoretical. During bring-up, one retrieval run ended with the model
-emitting `API Error: Sonnet 4.5 can't help with this` **after** its tool had already run.
-The task still completed correctly, with the right row IDs, because the answer never
-depended on what the model said.
-
-### 2. Ordering is a data dependency, not an instruction
-
-The old pipeline's system prompt said "You MUST use these tools in the correct order" and
-nothing checked it — `AgentExecutor` imposed no ordering, no iteration cap and no failure
-handling. Here every handler runs a precondition prologue first:
-
-```json
-{"error":"PRECONDITION_FAILED","code":"BUDGET_NOT_MEASURED",
- "phase":"CREATED","required_phase":"MEASURED",
- "remedy":"Call mcp__reconstruction_agent__measure_budget with this task_id first; it
-           reports how many tokens are free for retrieved context."}
-```
-
-The `remedy` is the only steering that matters, because it is emitted at the moment of
-violation by code that knows the real state.
-
-| Code | Fires when |
-|---|---|
-| `BUDGET_NOT_MEASURED` | admitting before measuring |
-| `BUDGET_MISMATCH` | `free_tokens` is not the agent's current value; the true one is returned |
-| `GAP_LENGTH_MUTATED` | a target length other than the one the task carries |
-| `NOTHING_ADMITTED` / `EMPTY_CONTEXT` | generating with no context |
-| `NO_POOL` / `QUERY_CHANGED` | extending a pool that does not exist, or one re-opened with a different query |
-| `CALL_BUDGET_EXHAUSTED` / `DEADLINE_EXCEEDED` | a looping model; both terminate the task |
-
-### 3. Sequences are never tool arguments and never enter a prompt
-
-Every tool is keyed by `task_id` or `request_id`. The contigs, the query and the
-retrieved sequences live in agent state. The old planner interpolated the nucleotide
-string into the prompt and made the model re-emit it as a tool argument, with no
-checksum and no length assertion.
-
-Removing the query from the prompt also fixed a real failure and cut latency from 46 s to
-13 s per retrieval call.
-
----
-
-## Reading a trace
-
-Every run writes `results/<timestamp>_<gap_id>.json`. The fields that matter:
-
-| Field | Read it as |
-|---|---|
-| `context_tokens_admitted` | **The headline.** Tokens of retrieved context that reached the model. Zero means this run was not retrieval-augmented, whatever it is labelled. |
-| `free_tokens` | How much room there was, measured before anything was requested |
-| `truncated` | `true` means the input overran the 4,096-token window, so something was cut |
-| `candidates_offered` / `candidates_consumed` | The negotiation: how many were served and how many fitted |
-| `verdict` | `ACCEPTED`, or `REJECTED:` plus reasons |
-| `generation_attempts`, `seed_mask_count`, `final_mask_count` | The length search, which the old code printed and discarded |
-
-**The verdicts are deliberately distinguishable:**
-
-- `REJECTED:NO_CONTEXT` — *this system* is broken. Retrieval never reached the model.
-- `REJECTED:LENGTH` or `REJECTED:ALPHABET` — the underlying masked language model
-  produced something poor. That is a known limitation this project does not fix.
-
----
-
-## What A2A support is and is not
-
-Implemented: agent cards at `/.well-known/agent-card.json` and the
-`/.well-known/agent-configuration` alias; `GET /health`; JSON-RPC 2.0 `message/send`,
-`tasks/get`, `tasks/cancel` at `POST /`; `GET /tasks/{id}`; all nine `TaskState` values;
-`contextId` grouping; artifacts carrying a `DataPart` and a `TextPart`; terminal-task
-immutability.
-
-Not implemented, and answered with `-32601` rather than silently accepted:
-`message/stream` and SSE, push notifications and `tasks/pushNotificationConfig/*`,
-`tasks/resubscribe`, `FilePart`, authentication. `capabilities.streaming` and
-`capabilities.pushNotifications` are both `false` in the card.
-
-`message/send` blocks until the task reaches a terminal state. There is one long call per
-run and both callers want the answer, so polling would add machinery for no benefit.
-
-**There is no authentication.** These ports must not be exposed beyond the cluster's
-private network. On ARES the compute nodes sit on `172.25.x.x` and are unreachable from
-outside the allocation, which is the only thing protecting them.
-
-The HTTP layer is the Python standard library — `fastapi` and `uvicorn` are not installed
-here and nothing needs them. A useful side effect is that `a2a/` and `tools/` import under
-the system interpreter, so the protocol tests run without the SDK.
-
----
-
-## Configuration
-
-Everything in `config.py` is environment-overridable.
-
-| Variable | Default | What it does |
+| Variable | Default | Purpose |
 |---|---|---|
-| `GENOMIO_QUERY_FLANK` | 900 | Bases either side used to build the *retrieval* query |
-| `GENOMIO_MODEL_FLANK` | 2000 | Bases either side kept in the *model* input; `0` disables trimming |
-| `GENOMIO_MAX_LENGTH` | 4096 | GENA-LM's context window |
-| `GENOMIO_TOLERANCE` | 0.05 | Length tolerance for the gate |
-| `GENOMIO_AGENT_MODEL` | `claude-sonnet-4-5` | The model driving all three agents |
-| `GENOMIO_MAX_TURNS` | 24 | Hard cap per agent conversation |
-| `GENOMIO_MAX_CALLS_PER_TOOL` | 12 | Per-tool call budget; exceeding it terminates the task |
-| `GENOMIO_TASK_DEADLINE_S` | 900 | Wall-clock budget per task |
-| `GENOMIO_SEED` | 20260807 | `torch.manual_seed`, for reproducibility |
+| `GENOMIO_BASE_PORT` | 8100 | Coordinator port; Retrieval/Reconstruction default to the next two |
+| `GENOMIO_URL_COORDINATOR`, `GENOMIO_URL_RETRIEVAL`, `GENOMIO_URL_RECONSTRUCTION` | localhost role URLs | Peer endpoints |
+| `GENOMIO_QUERY_FLANK` | 900 | Retrieval flank length in bases |
+| `GENOMIO_MODEL_FLANK` | 2000 | Model flank length; zero disables trimming |
+| `GENOMIO_MAX_LENGTH`, `GENOMIO_SAFETY_TOKENS` | 4096, 32 | Token window and reservation |
+| `GENOMIO_TOLERANCE` | 0.05 | Gate length tolerance |
+| `GENOMIO_THRESHOLD`, `GENOMIO_MAX_ATTEMPTS` | 0.01, 10 | Generation settings |
+| `GENOMIO_GENA_LM` | `AIRI-Institute/gena-lm-bigbird-base-t2t` | Reconstruction model |
+| `GENOMIO_AGENT_MODEL` | `claude-sonnet-4-5` | LLM driving the three agents |
+| `GENOMIO_MAX_TURNS`, `GENOMIO_MAX_CALLS_PER_TOOL` | 24, 12 | Conversation/tool limits; some tools have smaller explicit caps |
+| `GENOMIO_TASK_DEADLINE_S` | 900 | Deadline checked by tool guards |
+| `GENOMIO_SEED` | 20260807 | Torch seed set at model startup |
 
-`MODEL_FLANK` is the one worth understanding. Measured on gap1 (contigs of 5,951 and
-13,996 bases):
+The seed alone does not guarantee identical complete runs: the agent chooses batches, and sampling state advances. Other retrieval-pool and timeout settings are defined in `config.py`; paths there are repository-relative constants, not all environment-overridable.
 
-| Setting | Base input | Free for context |
-|---|---|---|
-| no trimming | 3,305 tokens | ~583 |
-| **2000 (default)** | **682 tokens** | **~3,236** |
-| the old harness's contig pair, untrimmed | 58,776 tokens | none — 14x over the window |
+Runtime outputs, ignored by Git, include `multiagent_system/results/<timestamp>_<gap_id>.json`, `multiagent_system/logs/tasks-<role>.jsonl`, process logs, and `.run/` endpoint/process metadata. JSON records include the task result, trace, and harness checks. Important trace fields are `context_tokens_admitted`, `free_tokens`, `input_tokens`, `truncated`, `candidates_offered`, `candidates_consumed`, `verdict`, `generation_attempts`, and `admitted_row_ids`.
 
----
+## Results and Validation Evidence
 
-## Layout
+[RESULTS.md](RESULTS.md) preserves historical local/SLURM measurements, trace excerpts, and test summaries. It reports 2,942 admitted tokens for an unrestricted gap1 run, with 3,850 input tokens within the 4,096-token window. Its reconstruction comparisons include composition-matched random baselines and do not demonstrate reliable recovery of the true gap. Findings concern that recorded case, not all genomes or possible generators.
 
-```
-multiagent_system/
-├── agents/       coordinator.py  retrieval.py  reconstruction.py
-├── tools/        *_tools.py (MCP tools)  mlm.py (generation)
-│                 corpus_store.py  organism_index.py
-├── a2a/          types.py  store.py  card.py  server.py  client.py
-├── runtime/      launcher.py  agent.py  state.py  blocking.py  errors.py
-├── tests/        contract, protocol, gate, flank-selection and naming tests
-├── config.py  gate.py  dataset.py  fleet.py
-├── test.py       end-to-end acceptance test
-├── deploy.sh     SLURM fleet launch
-└── RESULTS.md    measured outcomes
+The raw timestamped JSON files and logs cited there are absent from this checkout. Its older ten-assertion wording and later twelve-check listing describe different documentation stages; the current harness is the source for implemented checks. Historical pass counts are not a test run performed by opening this README.
+
+Run lightweight tests with heavy tests disabled:
+
+```bash
+multiagent_system/.venv/bin/python3 -m pytest multiagent_system/tests -c multiagent_system/pytest.ini
 ```
 
-Nothing under `src/` is modified. `tools/mlm.py` is a new module rather than an edit to
-`src/core/gap_filler_rag.py`, so the original pipeline stays runnable.
+The test configuration skips tests marked `heavy` unless `GENOMIO_HEAVY=1`. If the SDK is absent, SDK-dependent test modules are excluded. Deployment-parsing tests require a compatible Linux/Bash environment. The unmarked `test_agent_specs_build_and_validate_their_own_naming` also reads the real cached corpus through the Retrieval agent card, so a fresh checkout without `records.jsonl` can fail that test even with heavy tests disabled. Report skips and environment failures separately from passes.
 
----
+## Operational Limits
 
-## Operational notes
-
-**Process structure.** asyncio owns the main thread; the HTTP server runs on a daemon
-thread and hands work back with `run_coroutine_threadsafe`. The Claude Agent SDK binds an
-anyio task group and a CLI subprocess to whichever loop created them, so building it on a
-worker produces "cancel scope in a different task". All torch and faiss work goes through
-`runtime/blocking.py`, which combines `asyncio.to_thread` with one process-global lock —
-`src/rag/dnabert_s.py` keeps its tokenizer and model in unguarded module globals.
-
-**Health gating.** `/health` reports `models_loaded` only after warm-up returns. Sending
-work into a 30-second DNABERT-S load looks exactly like a hang.
-
-**Tool-id coupling.** A tool is `mcp__<server_key>__<tool_name>`. If `allowed_tools` and
-the registered names disagree, the SDK does not raise — the model is told it has no tools
-and starts talking. `LLMAgent.__init__` checks this at startup and `tests/test_naming.py`
-checks it statically.
-
-**Restricting the built-in tools.** `allowed_tools` alone let `ToolSearch` through;
-setting `tools` as well is what confines the model to this agent's own capabilities.
-`tests/test_agent_runtime.py` pins this, and `test.py` assertion 11 re-checks it on a
-live run.
-
-**Organism restriction.** Each organism occupies one contiguous block of corpus rows, so
-restriction over-fetches and post-filters. A sparse `faiss.IDSelectorBatch` on this HNSW
-index returns all `-1` — greedy graph traversal cannot reach enough accepted nodes, and
-raising `efSearch` does not help. `IDSelectorRange` is a tagged fallback whose output is
-checked for that under-fill signature.
-
-**On ARES.** `ssh` to a compute node is refused by `pam_slurm_adopt` without an
-allocation; `salloc` first and it works, and `deploy.sh` falls back to `srun --overlap`
-and says which path it took. `$HOME` and `/mnt/common` are shared, so the venv, the FAISS
-cache and `~/.claude` need no staging. `TMPDIR` is pointed at NVMe because the compute
-nodes' root filesystem is effectively full.
-
----
-
-## Known limitations
-
-**The generator is unchanged.** `predict_until_length` filled every mask in a single
-forward pass, so hundreds of adjacent masks mostly saw other masks and collapsed onto a
-few likely tokens. `tools/mlm.py` keeps that behaviour deliberately — the four changes it
-does make are the context position, the returned counters, the `threshold` argument and
-the measured mask seed, so any difference is attributable to those and not to a quietly
-different sampler. The output is still low-entropy and not really DNA; see `RESULTS.md`.
-
-**The gate is about plumbing, not correctness.** It verifies that retrieved context
-reached the model, that the length is plausible and that the output is nucleotides. It
-says nothing about whether the reconstruction is right.
-
-Measured on gap1: it is not. Scored properly, the predictions land at 33-42% identity
-against the true gap, and composition-matched random DNA scores the same. The system
-provably delivers context to the generator; the generator provably cannot use it. See
-`RESULTS.md` section 6, including why the restricted run's apparently better 42% is an
-artefact of base composition rather than a signal.
-
-**Single task at a time.** One process-global model lock, one task per agent in flight.
-Concurrency would need per-task model instances or a queue.
-
-**In-memory state.** Task state and retrieval pools do not survive a restart. Everything
-worth keeping is written to `logs/tasks-<role>.jsonl` and `results/`.
-
-**Terminal gaps are declined.** `gap33` of AP012051.1 runs past the end of the assembly
-and has no right-hand contig. 32 of the 33 gaps are reconstructable; the odd one out
-fails preflight rather than being filled against an invented flank.
+Model work uses a process-global lock through [runtime/blocking.py](runtime/blocking.py). The current harness submits one gap at a time; concurrent multi-gap behavior is not established by the recorded evidence. State is in memory, and the HTTP protocol has no authentication. Metadata fusion, broader biological validation, and changes to masked generation remain outside this implementation. See [known generation/scoring issues](../docs/gap_filling_known_bugs.md) and the historical report's future-work discussion.

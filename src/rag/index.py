@@ -11,7 +11,7 @@ returning, since distances are better when smaller and cosines when larger.
 HNSW is used rather than exact IndexFlatIP because the corpus has about 43,500 records
 and the benchmark measured HNSW overtaking exact search at around 1,000, while still
 agreeing with brute force on 100% of top-1 hits at that scale
-(embedder_benchmark/experiment_8_results.md and experiment_10_results.md).
+(embedder_benchmark/experiment_8_faiss_scale/results/experiment_8_results.md and embedder_benchmark/experiment_10_faiss_retrieval_scale/results/experiment_10_results.md).
 
 Building the index means embedding the whole corpus, which takes tens of minutes on CPU.
 The result is therefore cached under .cache/rag_index/ (gitignored) and reused. The cache
